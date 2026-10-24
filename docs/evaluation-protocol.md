@@ -119,3 +119,25 @@ PYTHONPATH=src .venv/bin/python -m evals.replay_v1 \
 PYTHONPATH=src .venv/bin/python -m evals.ablation --mode offline
 PYTHONPATH=src .venv/bin/python -m evals.run --mode offline
 ```
+
+## 7. Prospective v2/v3 run status (2026-10-24)
+
+This is a preparation record, not a frozen benchmark. The 36-case candidate set has 0
+fully reviewed cases; all 15 clean cases still need review. The original 15-case
+`prguard_v1.json` remains development-only and is never part of test or holdout metrics.
+The candidate set's `test` (17 cases) and `holdout` (7 cases) remain blocked until all
+36 labels are reviewed, corrections are published as a new version, and the new version
+passes strict label validation. Do not use holdout results to tune the system.
+
+The code-level preflight selects real prompt bodies with SHAs `044658d206ef` (v2) and
+`c6166a6c6edd` (v3). Both use the same `build_context_bundle` implementation and the
+same PathResolver, deduplication, and Verifier configuration. It also records raw
+reported-path validity and separates API, timeout, parse, and agent failures. This
+turn's `--dry-run` only prints the plan; no model was called.
+
+The prospective model is `deepseek-flash` through the OpenAI-compatible DeepSeek API.
+The preceding historical artifact remains labeled `deepseek-chat` and is not mixed into
+the new comparison. Temperature, `top_p`, and thinking mode are not currently pinned by
+PRGuard, and there is no enforceable spend cap. Therefore the real v2/v3 comparison is
+not yet reproducible or authorized for execution; these settings must be pinned and
+recorded before the human-reviewed dataset is frozen.

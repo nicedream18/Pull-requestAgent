@@ -23,3 +23,7 @@ The `Finding` schema requires category, severity, file, line range, evidence, su
 ## Reproducibility
 
 The offline runner uses fixed local fixtures and deterministic rules. Its metrics are labeled as pipeline and routing checks, not model quality. Online runs require an API key and record model, prompt version, date, tokens, latency, calls, failures, and estimated cost when price environment variables are provided.
+
+## Prospective model configuration
+
+The frozen October 24, 2026 run used the then-configured `deepseek/deepseek-chat`; that historical artifact is unchanged. Current local defaults use `deepseek/deepseek-flash` and the official `https://api.deepseek.com` base URL. Prompt v2/v3 test runs remain blocked until all 36 candidate cases, including clean cases, are human-reviewed. Temperature and `top_p` are still provider defaults, so the prospective experiment does not yet have a complete sampling-parameter freeze.

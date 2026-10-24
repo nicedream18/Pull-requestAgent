@@ -65,3 +65,47 @@ Two caveats apply to these numbers:
 2. `Full ctx tok/PR` and `Opt ctx tok/PR` (84.0 and 42.6) measure the review context string only, not the full prompt. The reported `Input tok/PR` of 3079.5 includes system prompts and is the number to quote for cost. The 49.3% context reduction does not translate into a 49.3% token-cost reduction.
 
 `estimated_api_cost_usd` is `n/a` because no price was configured for this model; set `PRGUARD_INPUT_PRICE_PER_1M` and `PRGUARD_OUTPUT_PRICE_PER_1M` to record it.
+
+## Independent dataset and prospective prompt comparison
+
+The 36-case `prguard_v2.json` candidate set is split dev/test/holdout = 12/17/7 and
+contains 26 proposed defects plus 15 clean cases. At this checkpoint, 0/36 cases are
+fully human-reviewed (33 draft, 3 initial indeterminate); all 15 clean cases remain
+pending. The import command reports 36 cases needing human work. It blocks official
+scoring until every row, including clean cases, has a named reviewer, timestamp,
+protocol version, and a reviewed decision. `needs_revision` and `indeterminate` are not
+scored as if they were confirmed labels.
+
+When review is complete, the importer writes a new reviewed dataset version with the
+review audit and CSV hash. The original candidate JSON and historical artifacts remain
+unchanged. The old 15 development fixtures remain pipeline regressions and are excluded
+from independent test and holdout metrics. Holdout is reserved for one final measurement
+after all decisions and pipeline settings are frozen.
+
+### v2/v3 dry-run plan
+
+| Setting | Planned value / status |
+| --- | --- |
+| Dataset | Candidate v2.1 `test` split only (17 cases); blocked pending review |
+| Prompt | v2 `044658d206ef` vs v3 `c6166a6c6edd`, real distinct prompt bodies |
+| Context | Same `build_context_bundle`; unchanged between prompt versions |
+| Post-processing | PathResolver, deduplication, and Verifier enabled for both |
+| Calls | About 46 per prompt run, about 92 for both; verifier replays make no model calls |
+| Failure accounting | API failures, timeouts, JSON parse failures, and agent failures recorded separately |
+| Sampling | Temperature, `top_p`, and thinking mode are not pinned; experiment is not frozen |
+| Spend cap | No hard cap is enforced; estimated cost is not an upper bound |
+
+The current DeepSeek Flash list price, checked October 24, 2026, is USD 0.15 per million
+input tokens and USD 0.60 per million output tokens off-peak; peak rates are USD 0.30
+and USD 1.20. (Pricing source: DeepSeek API pricing documentation,
+`https://api-docs.deepseek.com/quick_start/pricing`.) Extrapolating the first valid
+historical 15-case v2 run's 72,197 input
+and 20,768 output tokens to 17 cases for each of two prompts gives roughly USD 0.05
+off-peak or USD 0.11 at peak. This is only a planning estimate from the old model and
+development fixtures; the new Flash model, test cases, retries, and reasoning tokens can
+change consumption. It is not a hard cost ceiling.
+
+**Status: not ready for formal online evaluation.** Complete human review, resolve all
+`needs_revision` items in a new dataset version, pin supported model parameters, set an
+explicit budget policy, then freeze dataset and configuration before scoring test.
+Do not tune against holdout.

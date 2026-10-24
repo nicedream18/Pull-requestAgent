@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
+from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, case_has_defect, snapshot_for
+from evals.import_reviews import dataset_review_gate
 from evals.metrics import EVALUATOR_VERSION, aggregate_performance
 from prguard.agents import (
     DEFAULT_PROMPT_VERSION,
@@ -131,7 +133,8 @@ MEASURED_SECONDS_PER_RUN = 10.96 * 15
 
 def _print_dry_run(args, cases: list[dict], dataset: dict, prompt_version: str) -> int:
     strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else ["single", "static", "dynamic"]
-    defect_cases = sum(1 for case in cases if case["is_real_defect"])
+    defect_cases = sum(1 for case in cases if case_has_defect(case))
+    review_gate = dataset_review_gate(dataset)
     calls = MEASURED_CALLS_PER_PR * len(cases)
     cost_note = "set PRGUARD_INPUT_PRICE_PER_1M and PRGUARD_OUTPUT_PRICE_PER_1M to compute a real cost"
     input_rate = _price_env("PRGUARD_INPUT_PRICE_PER_1M")
@@ -146,12 +149,16 @@ def _print_dry_run(args, cases: list[dict], dataset: dict, prompt_version: str) 
     print(f"  mode              : {args.mode}")
     print(f"  strategies        : {', '.join(strategies)}")
     print(f"  dataset           : {args.dataset} v{dataset.get('dataset_version')}, {len(cases)} cases ({defect_cases} with a labelled defect)")
+    print(f"  selected split    : {args.split or 'all'}")
+    print(f"  human review gate : {'eligible' if review_gate['eligible'] else 'BLOCKED'}")
+    if not review_gate["eligible"]:
+        print(f"  pending cases     : {len(review_gate['pending_cases'])}")
     print(f"  evaluator         : {EVALUATOR_VERSION}")
     print(f"  prompt version    : {prompt_version}")
     print(f"  prompt sha        : {prompt_sha(prompt_version)}")
     print(f"  git commit        : {_git_commit()}")
     print(f"  condition checks  : {'on' if args.condition_checks == 'on' else 'off'}")
-    print(f"  model             : {args.model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-chat'}")
+    print(f"  model             : {args.model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-flash'}")
     credentials = "present" if (os.getenv("DEEPSEEK_API_KEY") or os.getenv("PRGUARD_API_KEY")) else "missing"
     print(f"  API key           : {credentials}")
     print(f"  planned LLM calls : about {calls:.0f} for one strategy, {calls * len(strategies):.0f} for all")
@@ -173,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=("offline", "online"), required=True)
     parser.add_argument("--strategy", choices=("single", "static", "dynamic", "all"), default=None)
     parser.add_argument("--dataset", type=Path, default=DATASET)
+    parser.add_argument("--split", choices=("dev", "test", "holdout"), default=None)
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals"))
     parser.add_argument("--model", default=None)
     parser.add_argument(
@@ -194,16 +202,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.mode == "online" and not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("PRGUARD_API_KEY")):
-        parser.error("online mode requires an LLM API key; use --mode offline for fixture-only evaluation")
-
     dataset = json.loads(args.dataset.read_text(encoding="utf-8"))
-    cases = dataset["cases"]
+    cases = [case for case in dataset["cases"] if args.split is None or case.get("split") == args.split]
+    if not cases:
+        parser.error(f"dataset has no cases for split {args.split!r}")
 
     chosen_prompt = prompt_version_or_default(args.prompt_version)
     if args.dry_run:
         return _print_dry_run(args, cases, dataset, chosen_prompt)
-    if len(cases) < 15:
+    review_gate = dataset_review_gate(dataset)
+    if not review_gate["eligible"]:
+        parser.error(
+            "candidate dataset is not eligible for scored evaluation; human-review every case, "
+            "including clean cases, and publish a corrected version first"
+        )
+    if args.mode == "online" and not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("PRGUARD_API_KEY")):
+        parser.error("online mode requires an LLM API key; use --mode offline for fixture-only evaluation")
+    if args.split is None and len(cases) < 15:
         parser.error("dataset must contain at least 15 manually reviewable cases")
     strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else (["single", "static", "dynamic"] if args.mode == "offline" else ["dynamic"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -231,7 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         "mode": args.mode,
         "evaluation_type": "deterministic_offline_fixture_runner" if args.mode == "offline" else "live_llm_on_local_fixtures",
         "dataset": str(args.dataset),
+        "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
         "dataset_version": dataset.get("dataset_version", "unknown"),
+        "split": args.split or "all",
         "case_count": len(cases),
         "prompt_version": chosen_prompt,
         "prompt_sha": prompt_sha(chosen_prompt),
@@ -284,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         "# PRGuard Benchmark",
         "",
         f"- Mode: `{args.mode}` ({document['evaluation_type']})",
-        f"- Dataset: `{args.dataset}` v{document['dataset_version']}, {len(cases)} manually reviewed fixtures",
+        f"- Dataset: `{args.dataset}` v{document['dataset_version']}, {len(cases)} development regression fixtures (not an independent human-adjudicated benchmark)",
+        f"- Split: `{args.split or 'all'}`",
         f"- Model: `{document['model']}`",
         f"- Prompt: `{chosen_prompt}` (sha `{prompt_sha(chosen_prompt)}`)",
         f"- Evaluated: `{document['evaluated_at']}`",

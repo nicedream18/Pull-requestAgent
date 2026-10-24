@@ -10,9 +10,12 @@ Run:
     PYTHONPATH=src python -m evals.review_packet --split test
 
 Writes:
-    docs/review/candidates.md    one section per case, for reading
-    docs/review/candidates.csv   one row per defect, for triage
-    docs/review/summary.md       what still needs a decision
+    <output>/candidates.md    one section per case, for reading
+    <output>/candidates.csv   one row per defect, for triage
+    <output>/summary.md       what still needs a decision
+
+The default output is ``docs/review``. Existing review CSVs are never overwritten;
+choose a new output directory to regenerate a clean packet.
 """
 
 from __future__ import annotations
@@ -159,6 +162,9 @@ def build(dataset: dict, split: str | None) -> tuple[str, list[dict], str]:
                     "other_unlabelled_defects": "",
                     "reviewer_notes": "",
                     "review_status": status,
+                    "reviewer_id": "",
+                    "reviewed_at": "",
+                    "review_version": "",
                 })
 
         if not defects:
@@ -176,6 +182,9 @@ def build(dataset: dict, split: str | None) -> tuple[str, list[dict], str]:
                 "other_unlabelled_defects": "",
                 "reviewer_notes": "",
                 "review_status": status,
+                "reviewer_id": "",
+                "reviewed_at": "",
+                "review_version": "",
             })
 
         if case.get("label_notes"):
@@ -216,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", choices=("dev", "test", "holdout"), default=None)
     parser.add_argument("--output", type=Path, default=OUT_DIR)
     args = parser.parse_args(argv)
+
+    if (args.output / "candidates.csv").exists():
+        parser.error(
+            f"refusing to overwrite {args.output / 'candidates.csv'}; "
+            "choose a new --output directory to preserve reviewer decisions"
+        )
 
     dataset = json.loads(args.dataset.read_text(encoding="utf-8"))
     markdown, rows, summary = build(dataset, args.split)

@@ -29,6 +29,9 @@ jobs:
       - name: Candidate dataset label consistency
         run: |
           PYTHONPATH=src uv run python -m evals.check_labels
+      - name: Human review import schema and progress
+        run: |
+          PYTHONPATH=src uv run python -m evals.import_reviews --report artifacts/review-progress.md
       - name: Review packet is regenerable
         run: |
           PYTHONPATH=src uv run python -m evals.review_packet --output artifacts/review-packet

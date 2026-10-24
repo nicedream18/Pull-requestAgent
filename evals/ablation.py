@@ -15,7 +15,7 @@ Usage:
 
     # online: one real model pass, then both verifier configurations
     PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
-        --model deepseek/deepseek-chat --output artifacts/evals/ablation
+        --model deepseek/deepseek-flash --output artifacts/evals/ablation
 
     # plan only
     PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online --dry-run
@@ -24,12 +24,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
+from evals.import_reviews import dataset_review_gate
 from evals.metrics import EVALUATOR_VERSION, evaluate_cases
 from evals.run import _git_commit, _price_env
 from prguard.agents import (
@@ -41,6 +43,11 @@ from prguard.agents import (
 from prguard.flow import ReviewFlow
 from prguard.models import Finding, FlowState, PRReviewRequest
 from prguard.verifier import verify_findings
+
+HISTORICAL_CASE_COUNT = 15
+HISTORICAL_INPUT_TOKENS = 72_197
+HISTORICAL_OUTPUT_TOKENS = 20_768
+HISTORICAL_LLM_CALLS = 41
 
 
 def _load_cases(path: Path) -> tuple[dict, list[dict]]:
@@ -86,7 +93,7 @@ def _run_once(
             failures.append({
                 "case_id": case["case_id"],
                 "error_type": type(exc).__name__,
-                "error": str(exc).replace("\n", " ")[:240],
+                "error": "review case failed; exception details omitted",
             })
             print(f"[{case['case_id']}] case failed: {type(exc).__name__}")
             states.append(flow.state)
@@ -160,22 +167,102 @@ def _summarise(label: str, scores: dict, rejections: dict, states: list[FlowStat
     }
 
 
-def _print_dry_run(mode: str, model: str | None, cases: list[dict], prompt_version: str) -> int:
+def _raw_path_validity(cases: list[dict], states: list[FlowState]) -> dict:
+    """Measure model-reported paths before PathResolver can repair them."""
+    rows = []
+    valid_total = raw_total = 0
+    for case, state in zip(cases, states, strict=True):
+        snapshot, _ = snapshot_for(case)
+        changed_paths = {item.path for item in snapshot.files}
+        findings = state.raw_findings
+        valid = sum(1 for finding in findings if finding.file_path in changed_paths)
+        valid_total += valid
+        raw_total += len(findings)
+        rows.append({
+            "case_id": case["case_id"],
+            "raw_findings": len(findings),
+            "valid_reported_paths": valid,
+            "valid_path_rate": valid / len(findings) if findings else 0.0,
+        })
+    return {
+        "raw_findings": raw_total,
+        "valid_reported_paths": valid_total,
+        "rate": valid_total / raw_total if raw_total else 0.0,
+        "by_case": rows,
+        "zero_findings_rate_rule": "0.0 when the run has no raw findings",
+    }
+
+
+def _failure_summary(cases: list[dict], states: list[FlowState], flow_failures: list[dict]) -> dict:
+    failed_agents = []
+    timeout_runs = parse_error_runs = api_error_runs = 0
+    agent_run_count = 0
+    failed_case_ids = {entry["case_id"] for entry in flow_failures}
+    for case, state in zip(cases, states, strict=True):
+        for run in state.agent_runs:
+            agent_run_count += 1
+            error_type = run.error_type or ""
+            if run.status == "success":
+                continue
+            failed_case_ids.add(case["case_id"])
+            timeout = run.status == "timeout" or error_type == "TimeoutError"
+            parse_error = error_type == "FindingParseError"
+            api_error = any(token in error_type for token in (
+                "API", "RateLimit", "Authentication", "ServiceUnavailable", "InternalServer", "BadRequest"
+            ))
+            timeout_runs += int(timeout)
+            parse_error_runs += int(parse_error)
+            api_error_runs += int(api_error)
+            failed_agents.append({
+                "case_id": case["case_id"],
+                "agent": run.agent,
+                "status": run.status,
+                "error_type": error_type or run.status,
+            })
+    return {
+        "flow_failed_case_count": len(flow_failures),
+        "cases_with_any_failure": sorted(failed_case_ids),
+        "failed_case_count": len(failed_case_ids),
+        "agent_run_count": agent_run_count,
+        "failed_agent_run_count": len(failed_agents),
+        "agent_failure_rate": len(failed_agents) / agent_run_count if agent_run_count else 0.0,
+        "api_error_runs": api_error_runs,
+        "timeout_runs": timeout_runs,
+        "parse_error_runs": parse_error_runs,
+        "failed_agents": failed_agents,
+    }
+
+
+def _print_dry_run(
+    mode: str,
+    model: str | None,
+    cases: list[dict],
+    prompt_version: str,
+    *,
+    split: str | None,
+    review_gate: dict,
+) -> int:
     input_rate = _price_env("PRGUARD_INPUT_PRICE_PER_1M")
     output_rate = _price_env("PRGUARD_OUTPUT_PRICE_PER_1M")
-    calls = 2.73 * len(cases)
+    calls = HISTORICAL_LLM_CALLS / HISTORICAL_CASE_COUNT * len(cases)
     print("PRGuard ablation dry run")
     print(f"  mode            : {mode}")
     print(f"  prompt version  : {prompt_version}")
     print(f"  prompt sha      : {prompt_sha(prompt_version)}")
     print(f"  git commit      : {_git_commit()}")
     print(f"  evaluator       : {EVALUATOR_VERSION}")
-    print(f"  model           : {model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-chat'}")
+    print(f"  model           : {model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-flash'}")
     print(f"  cases           : {len(cases)}")
+    print(f"  split           : {split or 'all'}")
+    print(f"  human review    : {'eligible' if review_gate['eligible'] else 'BLOCKED'}")
+    if not review_gate["eligible"]:
+        print(f"  pending cases   : {len(review_gate['pending_cases'])}")
     print(f"  model calls     : about {calls:.0f} (one pass; both rungs reuse the same raw findings)")
     print("  verifier passes : 2 (condition checks off, then on)")
     if input_rate is not None and output_rate is not None:
-        estimate = (3079.5 * len(cases) * input_rate + 2463.9 * len(cases) * output_rate) / 1_000_000
+        input_tokens = HISTORICAL_INPUT_TOKENS / HISTORICAL_CASE_COUNT * len(cases)
+        output_tokens = HISTORICAL_OUTPUT_TOKENS / HISTORICAL_CASE_COUNT * len(cases)
+        estimate = (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
         print(f"  estimated cost  : USD {estimate:.4f} at the configured price")
     else:
         print("  estimated cost  : set PRGUARD_*_PRICE_PER_1M to compute")
@@ -191,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one model pass and both verifier rungs.")
     parser.add_argument("--mode", choices=("offline", "online"), default="offline")
     parser.add_argument("--dataset", type=Path, default=DATASET)
+    parser.add_argument("--split", choices=("dev", "test", "holdout"), default=None)
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals/ablation"))
     parser.add_argument("--model", default=None)
     parser.add_argument(
@@ -202,10 +290,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    dataset, cases = _load_cases(args.dataset)
+    dataset, all_cases = _load_cases(args.dataset)
+    cases = [case for case in all_cases if args.split is None or case.get("split") == args.split]
+    if not cases:
+        parser.error(f"dataset has no cases for split {args.split!r}")
+    review_gate = dataset_review_gate(dataset)
     chosen_prompt = prompt_version_or_default(args.prompt_version)
     if args.dry_run:
-        return _print_dry_run(args.mode, args.model, cases, chosen_prompt)
+        return _print_dry_run(
+            args.mode, args.model, cases, chosen_prompt, split=args.split, review_gate=review_gate
+        )
+
+    if not review_gate["eligible"]:
+        parser.error(
+            "candidate dataset is not eligible for scored evaluation; human-review every case, "
+            "including clean cases, and publish a corrected version first"
+        )
 
     if args.mode == "online" and not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("PRGUARD_API_KEY")):
         parser.error("online mode requires an LLM API key")
@@ -234,10 +334,27 @@ def main(argv: list[str] | None = None) -> int:
         "prompt_version": chosen_prompt,
         "prompt_sha": prompt_sha(chosen_prompt),
         "dataset_version": dataset.get("dataset_version", "unknown"),
+        "dataset": str(args.dataset),
+        "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
+        "split": args.split or "all",
         "case_count": len(cases),
         "failed_cases": failures,
+        "failure_summary": _failure_summary(cases, states, failures),
+        "raw_path_validity": _raw_path_validity(cases, states),
         "mode": args.mode,
-        "model": args.model or os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-chat",
+        "model": args.model or os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-flash",
+        "sampling_parameters": {
+            "temperature": "provider default; not explicitly set by PRGuard",
+            "top_p": "provider default; not explicitly set by PRGuard",
+        },
+        "context_builder": "build_context_bundle; same implementation for every prompt version",
+        "postprocessing": {
+            "path_resolver": True,
+            "deduplication": True,
+            "verifier": True,
+            "primary_comparison_rung": "C (layer 1 + layer 2)",
+        },
+        "review_gate": review_gate,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
         "design": (
             "one model pass; B and C replay the same frozen raw findings through the verifier "

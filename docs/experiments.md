@@ -35,16 +35,16 @@ planned call count, expected wall time and, when `PRGUARD_INPUT_PRICE_PER_1M` /
 ```bash
 # B: taxonomy without condition checks
 PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic \
-  --model deepseek/deepseek-chat --condition-checks off --output artifacts/evals/ablation-b
+  --model deepseek/deepseek-flash --condition-checks off --output artifacts/evals/ablation-b
 
 # C: taxonomy plus evidence-aware verification
 PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic \
-  --model deepseek/deepseek-chat --condition-checks on --output artifacts/evals/ablation-c
+  --model deepseek/deepseek-flash --condition-checks on --output artifacts/evals/ablation-c
 
 # A: the recorded baseline pipeline
 git worktree add /tmp/prguard-v1 fcb4138
 cd /tmp/prguard-v1 && PYTHONPATH=src .venv/bin/python -m evals.run --mode online \
-  --strategy dynamic --model deepseek/deepseek-chat --output /tmp/ablation-a
+  --strategy dynamic --model deepseek/deepseek-flash --output /tmp/ablation-a
 ```
 
 Each run writes `results.json`, `results.csv`, `benchmark.md` and `benchmark.svg`. `results.json`
@@ -67,24 +67,15 @@ filled in.
 
 ## Cost estimate
 
-Measured consumption for the 15-fixture dynamic run (rung A, prompt v1):
+The historical prompt-v1 run on 15 development fixtures recorded 41 LLM calls, about
+3,079 input and 2,464 output tokens per case, and USD 0.0289 at the then-configured
+price. That is a past measurement for `deepseek-chat`, not a current quote for the
+Flash model.
 
-| Quantity | Value |
-| --- | ---: |
-| LLM calls per PR | 2.73 |
-| Calls for 15 fixtures | 41 |
-| Input tokens per PR | 3079 |
-| Input tokens per run | ~46k |
-| Output tokens per PR | ~2464 |
-| Output tokens per run | ~37k |
-
-At DeepSeek list prices of roughly USD 0.28 per million input tokens and USD 0.42 per million output
-tokens, one run of rung B or C costs about **USD 0.03**. Three repetitions of B and C, plus three of A,
-is roughly **USD 0.27** total. The cost is dominated by wall-clock time (about 3-4 minutes per run), not
-by tokens.
-
-Rung B and C should be cheaper than A per run, because the new prompt caps output at provable findings
-and the verifier rejects claims before reporting.
+The next v2/v3 test-split estimate uses the newer historical v2 consumption and current
+DeepSeek Flash list pricing; see [the benchmark readiness record](benchmark.md). It is
+only a planning estimate. PRGuard does not enforce a hard provider spend ceiling, and no
+claim is made that either prompt is cheaper before it has been measured.
 
 ## What must not change between rungs
 

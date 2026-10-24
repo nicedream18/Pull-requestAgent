@@ -1,4 +1,4 @@
-case_id,split,defect_id,file_path,line_range,issue_type,severity,evidence,trigger_condition,is_substantive_defect,other_unlabelled_defects,reviewer_notes,review_status
+case_id,split,defect_id,file_path,line_range,issue_type,severity,evidence,trigger_condition,is_substantive_defect,other_unlabelled_defects,reviewer_notes,review_status,reviewer_id,reviewed_at,review_version
 mf-secret-01,dev,mf-secret-01-d1,app/config.py,1-1,hardcoded_secret,critical,"API_TOKEN = ""sk-live-8f2b41c9de77""",Anyone with repository read access reads app/config.py line 1.,,,,draft
 mf-cross-02,holdout,mf-cross-02-d1,app/report.py,5-5,cross_file_breakage,high,return account.balance,Calling total() with any Account instance raises AttributeError.,,,,draft
 mf-two-defects-03,test,mf-two-defects-03-d1,app/search.py,2-2,sql_injection,critical,"cursor.execute(f""SELECT * FROM users WHERE name = '{name}'"")",A name containing a quote changes the query structure.,,,,draft

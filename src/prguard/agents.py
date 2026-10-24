@@ -184,7 +184,7 @@ SHARED_RULES = (
 
 
 def configured_model(model: str | None) -> str:
-    return model or os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-chat"
+    return model or os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-flash"
 
 
 def _llm_for(model: str | None) -> LLM:
@@ -201,6 +201,13 @@ def _llm_for(model: str | None) -> LLM:
     return LLM(**kwargs)
 
 
+class FindingParseError(ValueError):
+    """Agent output could not be parsed without retaining untrusted response text."""
+
+    def __init__(self) -> None:
+        super().__init__("model output did not contain a valid AgentFindings JSON object")
+
+
 def _agent_findings(value: object, source_agent: str) -> list[Finding]:
     if isinstance(value, AgentFindings):
         parsed = value
@@ -211,8 +218,11 @@ def _agent_findings(value: object, source_agent: str) -> list[Finding]:
         except Exception:
             match = re.search(r"\{.*\}", str(raw), flags=re.DOTALL)
             if not match:
-                return []
-            parsed = AgentFindings.model_validate_json(match.group(0))
+                raise FindingParseError from None
+            try:
+                parsed = AgentFindings.model_validate_json(match.group(0))
+            except Exception:
+                raise FindingParseError from None
     return [item.model_copy(update={"source_agent": source_agent}) for item in parsed.findings]
 
 

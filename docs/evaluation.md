@@ -17,7 +17,7 @@ PYTHONPATH=src .venv/bin/python -m evals.run --mode offline --strategy dynamic
 Online evaluation uses the same fixtures and requires an API key. It is intentionally separate from offline mode:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
+PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-flash
 ```
 
 ## Matching rules

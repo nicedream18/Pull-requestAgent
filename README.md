@@ -4,25 +4,42 @@ PRGuard is a reproducible GitHub pull request review system built with CrewAI Fl
 
 The project began from the CrewAI GitHub pull request review template already present in this repository. The original package remains under `src/code_review_crew_for_github_pull_request/`; PRGuard is the independently implemented package under `src/prguard/`. See [architecture-baseline](docs/architecture-baseline.md) and [contributions](docs/contributions.md) for provenance and the exact change boundary.
 
+## 🎯 Quick Navigation for Agent Engineering
+
+If you're interested in **multi-Agent system design**, start here:
+
+- **[Agent Design](docs/agent-design.md)** — Complete architecture: how agents are designed, routed dynamically, and coordinated. Core innovation: **4 specialist agents (CodeQuality, Security, TestImpact, Context)** with strict responsibility boundaries.
+- **[Prompt Evolution](docs/prompt-evolution.md)** — How we went from 93% false positives (v1) to 100% precision (v3). Includes root cause analysis, v1→v2→v3 improvements, and quantified results.
+- **[Interview Pitch](docs/interview-pitch.md)** — 3-5 minute pitch for Agent Developer Engineer role: core story, key innovations, and demo walkthrough.
+
+These documents are designed for interviews and technical discussions about Agent systems.
+
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[GitHub PR] --> B[Read-only fetch]
-    B --> C[Risk + context]
-    C --> D{CrewAI Flow router}
-    D --> E[Quality]
-    D --> F[Security]
-    D --> G[Test impact]
-    D --> H[Context]
-    E --> I[Verifier]
-    F --> I
-    G --> I
-    H --> I
-    I --> J[review.json / review.md / trace.json]
+flowchart TD
+    A[GitHub PR URL or repo + number] --> B[CLI / FastAPI]
+    B --> C[@start initialize]
+    C --> D[@listen fetch metadata, diff, changed files]
+    D --> E[Deterministic risk classification + Python context retrieval]
+    E --> F{@router strategy and risk}
+    F -->|single| Q[CodeQualityAgent]
+    F -->|static| S[All specialist agents]
+    F -->|dynamic| R[Only applicable agents]
+    R --> Q
+    R --> T[TestImpactAgent]
+    R --> U[SecurityAgent]
+    R --> V[ContextAgent]
+    Q --> W[Evidence verifier: path, line, evidence, dedup]
+    T --> W
+    U --> W
+    V --> W
+    S --> W
+    W --> X[review.json / review.md / trace.json]
+    W --> Y[SSE events to Vue Dashboard]
 ```
 
-Dynamic routing is deterministic: documentation-only changes run quality checks; executable changes add test-impact analysis; high-risk or large changes add security and context agents. Single and static strategies are available for evaluation. Specialist agents run concurrently under a semaphore, with a timeout, one bounded retry, independent error records, and no code execution or delegation.
+Dynamic routing is deterministic: documentation-only changes run CodeQualityAgent; executable changes add TestImpactAgent; high-risk or large changes also add SecurityAgent and ContextAgent. Static runs every specialist agent; single runs CodeQualityAgent. Selected agents run concurrently under a semaphore, with a timeout, bounded retry, isolated errors, and no code execution or delegation. The dashboard receives the actual route and agent states over SSE.
 
 ## Install
 
@@ -57,7 +74,7 @@ The command accepts `--model`, `--concurrency`, `--timeout-seconds`, and `--max-
 
 ## Offline demo and evaluation
 
-The checked-in dataset contains 15 manually reviewed Python fixtures covering null handling, missing exceptions, boundaries, resource leaks, SQL and shell injection, permissions, hard-coded secrets, test gaps, safe security patterns, documentation changes, and normal PRs.
+The development regression dataset contains 15 deterministic Python fixtures covering null handling, missing exceptions, boundaries, resource leaks, SQL and shell injection, permissions, hard-coded secrets, test gaps, safe security patterns, documentation changes, and normal PRs. Its labels are pipeline fixtures, not an independently human-adjudicated benchmark.
 
 Run all three strategies without an API key:
 
@@ -74,7 +91,7 @@ uv run python -m evals.run --mode offline --strategy dynamic
 The command writes timestamped `results.json`, `results.csv`, `benchmark.md`, and `benchmark.svg`. Offline scores describe the deterministic fixture runner plus routing, verification, and metric pipeline; they are not LLM quality claims. Online evaluation is available with the same fixtures once an API key is configured:
 
 ```bash
-uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
+uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-flash
 ```
 
 See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run, and [experiments](docs/experiments.md) for the A/B/C design, [ablation-results](docs/ablation-results.md) for the measured re-scoring, and the `--dry-run` flag for a no-cost plan check.
@@ -141,7 +158,7 @@ PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online --dry-run
 
 # one pass, both rungs, one report with raw + verified findings per case
 PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
-  --model deepseek/deepseek-chat --output artifacts/evals/ablation
+  --model deepseek/deepseek-flash --output artifacts/evals/ablation
 ```
 
 `--mode offline` exercises the harness with the deterministic runner; it validates the
@@ -154,18 +171,27 @@ fixtures cannot: 12 multi-file PRs, 15 clean PRs, 4 PRs with several defects, 26
 defects across three splits (12 dev / 17 test / 7 holdout), and 4 cases with a real unified
 diff (base revision, context lines, deletions, one rename).
 
-**No label in it is human-reviewed, and none was produced by a model.** All are `draft`,
-written alongside the fixture code. `evals/check_labels.py` verifies internal consistency
-only: cited file exists, line range valid, evidence present at the cited line, and the
-deterministic check does not contradict the label (23/23 consistent, 0 contradictions, 3
-`UNKNOWN` by design). Publishing a generalisation claim from this set requires a second
-reviewer first; `check_labels --require-reviewed` refuses to run while drafts remain.
+**No label in it is human-reviewed, and none was produced by a model.** The review sheet
+currently contains 36 cases, 26 proposed defects, and 15 no-defect cases; its case statuses
+are 33 draft and 3 indeterminate, so all 36 cases still need a human decision.
+`evals.check_labels` checks mechanical consistency only. `evals.import_reviews` validates
+decisions and can archive explicit snapshots; it never creates reviewer identity or
+approval. Until every case, including every clean case, is confirmed and corrections are
+published as a new dataset version, no result on this candidate set is a formal test-set
+metric.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m evals.check_labels
-PYTHONPATH=src .venv/bin/python -m evals.review_packet   # review material into docs/review/
+PYTHONPATH=src .venv/bin/python -m evals.import_reviews --report docs/review/progress.md
+PYTHONPATH=src .venv/bin/python -m evals.import_reviews --import --require-reviewed
+PYTHONPATH=src .venv/bin/python -m evals.review_packet --output /tmp/prguard-review-packet
 python evals/datasets/build_prguard_v2.py               # rebuild from the generator
 ```
+
+`review_packet` refuses to overwrite an existing `candidates.csv`. Each `--import` creates
+a new JSON audit snapshot under `docs/review/imports/`; an existing snapshot is never
+overwritten. `--require-reviewed` is a gate, not a label generator. See
+[the human review workflow](docs/review/README.md).
 
 ## Prompt versions
 
@@ -242,7 +268,7 @@ OTEL_SDK_DISABLED=true CREWAI_STORAGE_DIR=prguard uv run uvicorn prguard.api:app
 cd frontend && npm install && npm run dev
 ```
 
-Open `http://127.0.0.1:5173/`. Demo cases use the manually reviewed local fixtures and deterministic runner; they are clearly marked in the UI and are not real LLM quality measurements. Live mode requires the configured `.env` keys. Dashboard events are kept in memory, so a backend restart loses active runs and their SSE history.
+Open `http://127.0.0.1:5173/`. The three offline demo cases are `sql-injection-05`, `null-deref-01`, and `docs-only-09`; they replay deterministic development fixtures, use no LLM, and are not human-adjudicated benchmark results. The 36-case independent candidate set is separate and remains blocked until human review is complete. Live mode requires configured `.env` keys. Dashboard events are kept in memory, so a backend restart loses active runs and their SSE history. Follow the [3-5 minute demo script](docs/demo-script.md) for an interview walkthrough.
 
 Frontend checks:
 
@@ -251,6 +277,8 @@ cd frontend
 npm test
 npm run build
 ```
+
+Screenshot location: `docs/images/prguard-review.png`. No execution screenshot is committed yet; add a capture of the running dashboard there and label it as either offline Demo Fixture or live GitHub review. Do not use a mockup as an execution screenshot.
 
 ## Tests
 
