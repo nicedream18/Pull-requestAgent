@@ -183,15 +183,18 @@ class Finding(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_defect_claims(self) -> "Finding":
-        # A defect without a location or trigger cannot be verified, so it is
-        # demoted rather than silently accepted as a confirmed defect.
-        if self.finding_type is FindingType.DEFECT:
-            if not self.trigger_condition.strip():
-                self.finding_type = FindingType.ADVISORY
-                self.needs_human_review = True
-            elif self.start_line is None:
-                self.needs_human_review = True
+    def flag_unverifiable_claims(self) -> "Finding":
+        """Flag, but never reclassify, a defect that cannot be verified.
+
+        The model must stay faithful to the data it is given: recorded output from
+        an older prompt has no trigger_condition or line number, and silently
+        rewriting its finding_type would corrupt historical comparisons. The
+        verifier is what demotes a defect, because that is a pipeline decision.
+        """
+        if self.finding_type is FindingType.DEFECT and (
+            not self.trigger_condition.strip() or self.start_line is None
+        ):
+            self.needs_human_review = True
         return self
 
 

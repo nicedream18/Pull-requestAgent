@@ -22,38 +22,80 @@ PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic --
 
 ## Matching rules
 
-Matching is one-to-one and uses two channels. Both require the same `file_path`, and a finding that
-carries a line number must land within two lines of the labelled range.
+There are two scorers. `EVALUATOR_VERSION` is recorded in every artifact.
 
-1. **Structured.** `finding.issue_type` equals the labelled `defect_type`. This is language
-   independent, which matters because agents answer in Chinese while the labels are English. Findings
-   without a line number can still match this way.
-2. **Text.** Same `category`, plus token overlap with the label description (a finding without a line
-   needs `>= 0.20`; a located finding needs `>= 0.045`).
+### Unified (default, used for every comparison)
 
-Duplicate predictions cannot count as multiple true positives. Precision and recall are `0.0` when
-their denominators are zero. `docs/false-positive-analysis.md` records why the text-only rule of
-`prguard-review-v1` under-credited correct findings.
+A prediction counts as a detection only when **all** of these hold:
+
+1. `finding_type` is `defect`. An advisory is never a detection.
+2. `file_path` equals the labelled path.
+3. `start_line` is present and within two lines of the labelled `line_range`. A
+   finding without a line is **not** a detection; the only exception is a label that
+   explicitly sets `allow_unlocated`, which the current dataset never does.
+4. `evidence` appears verbatim in the changed file's source.
+5. Either `issue_type` equals the labelled `defect_type` (the `structured` channel),
+   or `issue_type` is `other`, `category` equals the labelled `category`, and the
+   title plus description overlaps the label description with Jaccard >= 0.20 (the
+   `text` channel). A different but specific `issue_type` is a wrong diagnosis and
+   does not match.
+
+`match_channels` reports how many detections came from each channel. A result that
+matches only through `text` is weaker evidence than a `structured` match.
+
+Greedy one-to-one assignment by weight, so duplicate predictions cannot score twice.
+
+### Legacy (history only)
+
+`_legacy_score` is a frozen copy of the matcher that produced the published
+`prguard-review-v1` numbers: file + category + line window + token overlap, with a
+finding that has no line able to match structurally. It is never used for a
+comparison, and `tests/test_evaluator_v1_replay.py` fails if it drifts.
+
+### Reported views
+
+| Keys | Rule |
+| --- | --- |
+| `defect_precision` / `defect_recall` / `f1_score` | unified, advisories excluded from the denominator |
+| `strict_precision` / `strict_recall` / `strict_f1` | unified, advisories counted as false positives |
+| `legacy_precision` / `legacy_recall` / `legacy_f1` | frozen v1 matcher |
+
+Reporting both unified views means a run cannot raise its headline number by
+relabelling findings as advice: `strict_precision` falls, and `advisory_rate` rises
+in the same table.
 
 ## Finding classes
 
-`finding_type=defect` (proven wrong behaviour) and `finding_type=advisory` (improvement suggestion) are
-scored separately:
-
-* `defect_precision` / `defect_recall` / `f1_score` count confirmed defects only.
-* `strict_precision` / `strict_recall` / `strict_f1` also count advisories as false positives.
-* `advisory_rate` and `needs_human_review_count` expose how much output was downgraded.
-
-Reporting both prevents a run from improving its headline number by relabelling findings as advice.
-`mean_findings_per_pr` and `false_positives_per_no_defect_pr` describe output volume.
+`finding_type=defect` (proven wrong behaviour) and `finding_type=advisory`
+(improvement suggestion). `needs_human_review` marks a finding the pipeline could not
+confirm. `verification_status` records the verifier's own verdict
+(`verified` / `uncertain`), and `rejection_reason` explains a demotion.
 
 ## Per-agent and verifier metrics
 
-Each run also records `raw_finding_count` (before verification), `verified_finding_count`,
-`verifier_rejection_rate`, `rejection_types` (`invalid_path`, `invalid_line`, `evidence_mismatch`,
-`condition_not_met`), and `agent_stats` with per-agent `accepted`, `rejected`, `rejection_rate` and
-`valid_ratio`. `verifier_rejection_rate` together with `defect_recall` shows whether rejected output
-was noise or lost recall.
+Each run also records `raw_finding_count` (before verification),
+`verified_finding_count`, `verifier_rejection_rate`, `rejection_types`
+(`invalid_path`, `invalid_line`, `evidence_mismatch`, `condition_not_met`), and
+`agent_stats` with per-agent `accepted`, `rejected`, `rejection_rate` and
+`valid_ratio`. `verifier_rejection_rate` together with `defect_recall` shows whether
+rejected output was noise or lost recall. `mean_findings_per_pr` and
+`false_positives_per_no_defect_pr` describe output volume.
+
+## Re-scoring a recorded run
+
+`evals.replay_v1` re-scores an archived `results.json` without calling a model:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.replay_v1 \
+  --input artifacts/evals/online/20261024T081509Z/results.json \
+  --output artifacts/evals/replay
+```
+
+It maps recorded findings onto the current schema deterministically: `issue_type`
+becomes `other` and `finding_type` becomes `defect` because v1 had neither field, and
+a missing `start_line` is never filled in from the label. It then reports the legacy
+score, the unified score, and the unified score after replaying the recorded output
+through the current verifier.
 
 The command writes `results.json`, `results.csv`, `benchmark.md`, and `benchmark.svg` below the chosen
 output directory. Online scores must not be inferred when no API key is available.

@@ -73,6 +73,24 @@ def changed_lines(snapshot: PRSnapshot) -> dict[str, set[int]]:
     return mapping
 
 
+TEST_FILE = re.compile(r"(^|/)(tests?|testing)/|(^|/)test_[^/]+\.py$|_test\.py$")
+
+
+def _test_paths_for(module_path: str, candidates: set[str] | None) -> set[str]:
+    """Test files in the supplied context that plausibly cover `module_path`."""
+    if not candidates:
+        return set()
+    stem = module_path.rsplit("/", 1)[-1].removesuffix(".py")
+    found = set()
+    for path in candidates:
+        name = path.rsplit("/", 1)[-1]
+        if not TEST_FILE.search(path) or not path.endswith(".py"):
+            continue
+        if stem and (stem in name or name.startswith("test_")):
+            found.add(path)
+    return found
+
+
 @dataclass
 class _Rejection:
     kind: str
@@ -136,9 +154,13 @@ def verify_findings(
     related_paths: set[str] | None = None,
     *,
     check_conditions: bool = True,
+    require_trigger: bool = True,
 ) -> tuple[list[Finding], list[dict[str, str]]]:
     """Layer 1 deterministic checks, layer 2 condition checks, then deduplicate."""
     valid_paths = {file.path for file in snapshot.files} | (related_paths or set())
+    # A retrieved file is evidence even when it is not part of the changed set, and
+    # the test-coverage check needs to see those paths.
+    known_paths = valid_paths | set(source_map)
     touched = changed_lines(snapshot)
     accepted: list[Finding] = []
     rejected: list[dict[str, str]] = []
@@ -148,6 +170,15 @@ def verify_findings(
         if failure is not None:
             rejected.append(failure.as_dict(finding))
             continue
+
+        if (
+            require_trigger
+            and finding.finding_type is FindingType.DEFECT
+            and not finding.trigger_condition.strip()
+        ):
+            # An agent that cannot state the trigger has not proven a defect.
+            finding = _downgrade(finding, "no trigger condition was stated for this claim")
+            finding.confidence = min(finding.confidence, 0.54)
 
         finding.evidence_level = EvidenceLevel.EXACT
         if (
@@ -160,7 +191,10 @@ def verify_findings(
 
         if check_conditions and finding.issue_type.value != "other":
             verdict = evaluate_condition(
-                finding.issue_type, source_map.get(finding.file_path, ""), finding.start_line
+                finding.issue_type,
+                source_map.get(finding.file_path, ""),
+                finding.start_line,
+                test_paths_for_module=_test_paths_for(finding.file_path, known_paths),
             )
             if verdict.status == CONTRADICTED:
                 rejected.append(

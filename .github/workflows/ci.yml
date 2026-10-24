@@ -21,20 +21,45 @@ jobs:
         run: PYTHONPATH=src uv run pytest tests -q
       - name: Offline benchmark
         run: PYTHONPATH=src uv run python -m evals.run --mode offline --output artifacts/ci
-      - name: Assert offline benchmark still detects every labelled defect
+      - name: Assert the offline baseline did not regress
         run: |
           python - <<'PY'
           import glob, json, sys
 
           path = sorted(glob.glob("artifacts/ci/*/results.json"))[-1]
           data = json.load(open(path))
+
+          if data.get("evaluator_version") != "prguard-eval-v2":
+              sys.exit(f"unexpected evaluator: {data.get('evaluator_version')}")
+
           dynamic = data["strategies"]["dynamic"]
-          print(json.dumps({k: dynamic[k] for k in ("tp", "fp", "fn", "defect_precision", "defect_recall")}, indent=2))
-          if dynamic["tp"] != 10 or dynamic["fn"] != 0:
-              sys.exit("offline dynamic strategy regressed on the labelled fixtures")
-          if dynamic["defect_precision"] < 1.0:
+          print(json.dumps({k: dynamic[k] for k in (
+              "tp", "fp", "fn", "defect_precision", "defect_recall", "strict_f1", "advisory_rate"
+          )}, indent=2))
+
+          # The dynamic strategy must detect every labelled defect it is allowed to
+          # claim. test-gap-07 is intentionally advisory: a diff cannot prove that no
+          # test exists, so the verifier refuses to confirm it. That is the only
+          # permitted miss, and it must stay an explicit, documented exception.
+          if dynamic["fp"] != 0:
               sys.exit("offline dynamic strategy produced false positives on the fixtures")
+          if dynamic["tp"] != 9 or dynamic["fn"] != 1:
+              sys.exit("offline dynamic recall changed; update the docs before the assertions")
+          if dynamic["defect_precision"] < 1.0:
+              sys.exit("offline dynamic precision regressed")
           PY
+
+  replay-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync
+      - name: Verify the legacy matcher still reproduces the published v1 numbers
+        run: PYTHONPATH=src uv run pytest tests/test_evaluator_v1_replay.py -q
 
   frontend:
     runs-on: ubuntu-latest

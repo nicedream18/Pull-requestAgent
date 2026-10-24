@@ -8,10 +8,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
-from evals.metrics import aggregate_performance
+from evals.metrics import EVALUATOR_VERSION, aggregate_performance
 from prguard.agents import PROMPT_VERSION
 from prguard.flow import ReviewFlow
 from prguard.models import PRReviewRequest
+
+
+def _git_commit() -> str:
+    try:
+        import subprocess
+
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _write_chart(path: Path, summaries: dict[str, dict]) -> None:
@@ -71,6 +82,7 @@ def _run_strategy(
         case_results.append({
             "case_id": case["case_id"],
             "findings": findings,
+            "raw_findings": [finding.model_dump(mode="json") for finding in state.findings],
             "rejected": rejected,
             "run_metrics": {
                 "execution_seconds": state.execution_time,
@@ -92,6 +104,7 @@ def _run_strategy(
             "status": state.review_status,
             "selected_agents": state.selected_agents,
             "findings": [finding.model_dump(mode="json") for finding in findings],
+            "raw_findings": [finding.model_dump(mode="json") for finding in state.findings],
             "rejected": rejected,
             "errors": state.errors,
             **case_results[-1]["run_metrics"],
@@ -101,6 +114,51 @@ def _run_strategy(
     return summary, per_case_runs
 
 
+# Measured on the 15-fixture dynamic run recorded in docs/benchmark.md. Used only
+# for a planning estimate; a real invoice is never claimed from these numbers.
+MEASURED_CALLS_PER_PR = 2.73
+MEASURED_INPUT_TOKENS_PER_PR = 3079.5
+MEASURED_OUTPUT_TOKENS_PER_PR = 2463.9
+MEASURED_SECONDS_PER_RUN = 10.96 * 15
+
+
+def _print_dry_run(args, cases: list[dict], dataset: dict) -> int:
+    strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else ["single", "static", "dynamic"]
+    defect_cases = sum(1 for case in cases if case["is_real_defect"])
+    calls = MEASURED_CALLS_PER_PR * len(cases)
+    cost_note = "set PRGUARD_INPUT_PRICE_PER_1M and PRGUARD_OUTPUT_PRICE_PER_1M to compute a real cost"
+    input_rate = _price_env("PRGUARD_INPUT_PRICE_PER_1M")
+    output_rate = _price_env("PRGUARD_OUTPUT_PRICE_PER_1M")
+    if input_rate is not None and output_rate is not None:
+        estimate = (
+            MEASURED_INPUT_TOKENS_PER_PR * len(cases) * input_rate
+            + MEASURED_OUTPUT_TOKENS_PER_PR * len(cases) * output_rate
+        ) / 1_000_000
+        cost_note = f"estimated USD {estimate:.4f} per run at the configured price"
+    print("PRGuard evaluation dry run")
+    print(f"  mode              : {args.mode}")
+    print(f"  strategies        : {', '.join(strategies)}")
+    print(f"  dataset           : {args.dataset} v{dataset.get('dataset_version')}, {len(cases)} cases ({defect_cases} with a labelled defect)")
+    print(f"  evaluator         : {EVALUATOR_VERSION}")
+    print(f"  prompt            : {PROMPT_VERSION}")
+    print(f"  condition checks  : {'on' if args.condition_checks == 'on' else 'off'}")
+    print(f"  model             : {args.model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-chat'}")
+    credentials = "present" if (os.getenv("DEEPSEEK_API_KEY") or os.getenv("PRGUARD_API_KEY")) else "missing"
+    print(f"  API key           : {credentials}")
+    print(f"  planned LLM calls : about {calls:.0f} for one strategy, {calls * len(strategies):.0f} for all")
+    print(f"  expected wall time: about {MEASURED_SECONDS_PER_RUN * len(strategies) / 60:.1f} min per full sweep, from the measured 10.96 s mean per PR")
+    print(f"  cost              : {cost_note}")
+    print("  nothing was executed; remove --dry-run to spend tokens")
+    return 0
+
+
+def _price_env(name: str) -> float | None:
+    try:
+        return max(0.0, float(os.environ[name]))
+    except (KeyError, ValueError):
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run reproducible PRGuard evaluation fixtures.")
     parser.add_argument("--mode", choices=("offline", "online"), required=True)
@@ -108,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals"))
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the configuration and print the plan and cost estimate without calling a model.",
+    )
     parser.add_argument(
         "--condition-checks",
         choices=("on", "off"),
@@ -121,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
 
     dataset = json.loads(args.dataset.read_text(encoding="utf-8"))
     cases = dataset["cases"]
+
+    if args.dry_run:
+        return _print_dry_run(args, cases, dataset)
     if len(cases) < 15:
         parser.error("dataset must contain at least 15 manually reviewable cases")
     strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else (["single", "static", "dynamic"] if args.mode == "offline" else ["dynamic"])
@@ -142,7 +208,9 @@ def main(argv: list[str] | None = None) -> int:
         all_cases[strategy] = detail
 
     document = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
+        "evaluator_version": EVALUATOR_VERSION,
+        "git_commit": _git_commit(),
         "mode": args.mode,
         "evaluation_type": "deterministic_offline_fixture_runner" if args.mode == "offline" else "live_llm_on_local_fixtures",
         "dataset": str(args.dataset),
@@ -151,24 +219,46 @@ def main(argv: list[str] | None = None) -> int:
         "prompt_version": PROMPT_VERSION,
         "model": args.model or (os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") if args.mode == "online" else "deterministic-fixture-runner"),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
-        "matching": "one-to-one assignment; requires same file and category, line within two lines, and semantic token overlap >= 0.045",
+        "condition_checks": args.condition_checks == "on",
+        "matching": (
+            "unified: defect only, same file, concrete start_line within two lines, evidence present verbatim in "
+            "the changed file, then issue_type equality (structured) or label category plus token overlap >= 0.20 "
+            "(text). legacy_* keys reproduce the prguard-review-v1 matcher."
+        ),
+        "strict_rule": "advisories are never true positives and count as false positives in strict_*",
         "zero_denominator_rule": "precision and recall are 0.0 when their denominator is zero",
         "strategies": summaries,
         "cases": all_cases,
     }
     (output_dir / "results.json").write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     with (output_dir / "results.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["mode", "strategy", "precision", "recall", "f1", "tp", "fp", "fn", "mean_full_context_tokens", "mean_optimized_context_tokens", "mean_context_tokens_saved", "mean_input_tokens", "mean_total_tokens", "mean_llm_calls", "mean_latency_seconds", "p95_latency_seconds", "estimated_api_cost_usd", "agent_failure_rate"])
+        writer = csv.DictWriter(file, fieldnames=["mode", "strategy", "evaluator_version", "precision", "recall", "f1", "strict_precision", "strict_recall", "strict_f1", "legacy_precision", "legacy_recall", "legacy_f1", "pre_verifier_precision", "pre_verifier_recall", "pre_verifier_fp", "post_verifier_precision", "post_verifier_recall", "tp", "fp", "fn", "advisory_rate", "mean_findings_per_pr", "false_positives_per_no_defect_pr", "mean_full_context_tokens", "mean_optimized_context_tokens", "mean_context_tokens_saved", "mean_input_tokens", "mean_output_tokens", "mean_total_tokens", "mean_llm_calls", "mean_latency_seconds", "p95_latency_seconds", "estimated_api_cost_usd", "agent_failure_rate", "verifier_rejection_rate"])
         writer.writeheader()
         for strategy, result in summaries.items():
             writer.writerow({
                 "mode": args.mode,
                 "strategy": strategy,
+                "evaluator_version": EVALUATOR_VERSION,
                 "precision": result["defect_precision"],
                 "recall": result["defect_recall"],
                 "f1": result["f1_score"],
+                "strict_precision": result["strict_precision"],
+                "strict_recall": result["strict_recall"],
+                "strict_f1": result["strict_f1"],
+                "legacy_precision": result["legacy_precision"],
+                "legacy_recall": result["legacy_recall"],
+                "legacy_f1": result["legacy_f1"],
+                "pre_verifier_precision": result.get("pre_verifier_precision"),
+                "pre_verifier_recall": result.get("pre_verifier_recall"),
+                "pre_verifier_fp": result.get("pre_verifier_fp"),
+                "post_verifier_precision": result.get("post_verifier_precision"),
+                "post_verifier_recall": result.get("post_verifier_recall"),
                 "tp": result["tp"], "fp": result["fp"], "fn": result["fn"],
-                **{key: result[key] for key in ("mean_full_context_tokens", "mean_optimized_context_tokens", "mean_context_tokens_saved", "mean_input_tokens", "mean_total_tokens", "mean_llm_calls", "mean_latency_seconds", "p95_latency_seconds", "estimated_api_cost_usd", "agent_failure_rate")},
+                "advisory_rate": result["advisory_rate"],
+                "mean_findings_per_pr": result["mean_findings_per_pr"],
+                "false_positives_per_no_defect_pr": result["false_positives_per_no_defect_pr"],
+                "verifier_rejection_rate": result["verifier_rejection_rate"],
+                **{key: result[key] for key in ("mean_full_context_tokens", "mean_optimized_context_tokens", "mean_context_tokens_saved", "mean_input_tokens", "mean_output_tokens", "mean_total_tokens", "mean_llm_calls", "mean_latency_seconds", "p95_latency_seconds", "estimated_api_cost_usd", "agent_failure_rate")},
             })
     chart_name = "benchmark.svg"
     _write_chart(output_dir / chart_name, summaries)
@@ -180,19 +270,30 @@ def main(argv: list[str] | None = None) -> int:
         f"- Model: `{document['model']}`",
         f"- Prompt: `{PROMPT_VERSION}`",
         f"- Evaluated: `{document['evaluated_at']}`",
-        "- Matching: one-to-one, same file/category, line distance <= 2, semantic overlap >= 0.045.",
+        f"- Evaluator: `{EVALUATOR_VERSION}`",
+        f"- Condition checks: `{'on' if args.condition_checks == 'on' else 'off'}`",
+        f"- Git commit: `{_git_commit()}`",
+        "- Matching: unified strict rule; `legacy_*` columns reproduce prguard-review-v1.",
         "- Zero denominators produce 0.0 precision or recall.",
         "",
     ]
     if args.mode == "offline":
         lines.extend(["> Offline scores exercise a deterministic regex fixture runner and the routing, verification, and scoring pipeline. They are not LLM quality results and must not be compared with online agent quality.", ""])
     lines.extend([
-        "| Strategy | Precision | Recall | F1 | TP | FP | FN | Full ctx tok/PR | Opt ctx tok/PR | Input tok/PR | Calls/PR | Mean s | P95 s | Est. USD | Agent fail rate |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Strategy | Precision | Recall | F1 | Strict F1 | Pre-verifier R | Post-verifier R | TP | FP | FN | Advisory rate | Findings/PR | FP per clean PR | Input tok/PR | Calls/PR | Mean s | P95 s | Est. USD | Agent fail rate |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for strategy, result in summaries.items():
         cost = "n/a" if result["estimated_api_cost_usd"] is None else f"{result['estimated_api_cost_usd']:.6f}"
-        lines.append(f"| {strategy} | {result['defect_precision']:.3f} | {result['defect_recall']:.3f} | {result['f1_score']:.3f} | {result['tp']} | {result['fp']} | {result['fn']} | {result['mean_full_context_tokens']:.1f} | {result['mean_optimized_context_tokens']:.1f} | {result['mean_input_tokens']:.1f} | {result['mean_llm_calls']:.2f} | {result['mean_latency_seconds']:.3f} | {result['p95_latency_seconds']:.3f} | {cost} | {result['agent_failure_rate']:.3f} |")
+        lines.append(
+            f"| {strategy} | {result['defect_precision']:.3f} | {result['defect_recall']:.3f} | {result['f1_score']:.3f} | "
+            f"{result['strict_f1']:.3f} | {result.get('pre_verifier_recall', 0):.3f} | {result.get('post_verifier_recall', 0):.3f} | "
+            f"{result['tp']} | {result['fp']} | {result['fn']} | {result['advisory_rate']:.3f} | "
+            f"{result['mean_findings_per_pr']:.2f} | {result['false_positives_per_no_defect_pr']:.2f} | "
+            f"{result['mean_input_tokens']:.1f} | {result['mean_llm_calls']:.2f} | "
+            f"{result['mean_latency_seconds']:.3f} | {result['p95_latency_seconds']:.3f} | {cost} | "
+            f"{result['agent_failure_rate']:.3f} |"
+        )
     lines.extend(["", f"Chart: [{chart_name}]({chart_name})", "", "Per-case outcomes and findings are recorded in `results.json`; the normalized summary is in `results.csv`."])
     (output_dir / "benchmark.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Wrote benchmark outputs to {output_dir}")

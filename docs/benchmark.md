@@ -1,22 +1,34 @@
 # Benchmark Record
 
+Every record below states the evaluator version that produced it. Numbers from different evaluator
+versions are not comparable, and the `legacy_*` keys exist only to reproduce older records.
+
 The checked-in benchmark command is the source of truth for current measurements. Running it creates a timestamped report and records model, prompt version, dataset version, date, tokens, latency, calls, failures, and findings.
 
-The offline run completed on October 23, 2026 with 15 fixtures and the deterministic fixture runner. The current result was:
+The offline record below was produced by `prguard-eval-v2` with condition checks enabled:
 
-| Strategy | Precision | Recall | F1 | Full ctx tok/PR | Optimized ctx tok/PR | Input tok/PR | Calls/PR |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Single | 1.000 | 0.500 | 0.667 | 84.0 | 42.6 | 42.6 | 1.00 |
-| Static | 1.000 | 1.000 | 1.000 | 84.0 | 42.6 | 170.4 | 4.00 |
-| Dynamic | 1.000 | 1.000 | 1.000 | 84.0 | 42.6 | 117.1 | 2.73 |
+| Strategy | Precision | Recall | F1 | Strict P | Strict R | Strict F1 | TP | FP | FN | Advisory rate | Findings/PR | FP per clean PR | Input tok/PR | Calls/PR | Mean s | P95 s | Est. USD | Agent fail rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single | 1.000 | 0.500 | 0.667 | 1.000 | 0.500 | 0.667 | 5 | 0 | 5 | 0.000 | 0.33 | 0.00 | 42.6 | 1.00 | 0.000 | 0.001 | n/a | 0.000 |
+| static | 1.000 | 0.900 | 0.947 | 0.900 | 0.900 | 0.900 | 9 | 0 | 1 | 0.100 | 0.67 | 0.00 | 170.4 | 4.00 | 0.000 | 0.001 | n/a | 0.000 |
+| dynamic | 1.000 | 0.900 | 0.947 | 0.900 | 0.900 | 0.900 | 9 | 0 | 1 | 0.100 | 0.67 | 0.00 | 117.1 | 2.73 | 0.000 | 0.001 | n/a | 0.000 |
 
-Single found 5 of 10 labeled defects. Static and Dynamic found all 10 in this deterministic fixture set. The optimized context averaged 42.6 tokens versus 84.0 for the full-context baseline, a 49.3% reduction. Dynamic used 31.3% fewer input tokens than Static and 31.7% fewer calls per PR. These values describe the fixture rules plus routing and verification pipeline, and the sub-millisecond local latency is not representative of an online LLM run. They are not claims about LLM review quality. Run the command again after changing fixtures or rules rather than treating this record as a universal performance guarantee.
 
-No online LLM result is recorded in this repository because no live API evaluation was authorized or required for the offline development pass.
+`dynamic` and `static` each confirm 9 of the 10 labelled defects. The single miss is
+`test-gap-07` (`missing_test_coverage`): a diff cannot prove that no test exists, so the
+verifier returns `UNKNOWN`, keeps the finding as an advisory flagged for human review, and
+`advisory_rate` records the cost. That is a deliberate recall-for-honesty trade, not a
+regression, and `docs/ablation-results.md` §4 states it as such.
+
+Single and static strategies are evaluated with the same evaluator, so the comparison is
+like-for-like. Single confirms 5 of 10 because one agent only covers its own scope.
 
 ## Online LLM record
 
-> **Status:** this record belongs to prompt `prguard-review-v1` with the layer-1-only verifier. The
+> **Status:** this record belongs to prompt `prguard-review-v1` with the layer-1-only verifier and
+> the pre-`prguard-eval-v2` matcher. Its 0.093 / 0.700 / 0.165 is reproduced exactly by the frozen
+> `legacy_*` keys and by `evals.replay_v1`; the same recording scores 0.013 / 0.100 / 0.024 under the
+> unified rule. See [ablation-results](ablation-results.md) before quoting either. The
 > current branch ships `prguard-review-v2`, which adds the issue-type taxonomy, defect/advisory
 > separation, abstention and AST condition checks. The numbers below are the *baseline* for the
 > ablation in `docs/false-positive-analysis.md`; they are not what the current code produces. A fresh

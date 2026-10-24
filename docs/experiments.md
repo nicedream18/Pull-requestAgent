@@ -7,15 +7,28 @@ it in a way someone else can re-run. This document records the design, the switc
 
 | Rung | Configuration | How to run | Status |
 | --- | --- | --- | --- |
-| A | Dynamic multi-agent, prompt `prguard-review-v1`, layer-1 verifier | checkout `fcb4138`, then `--mode online --strategy dynamic` | **measured** (15 fixtures, see `docs/benchmark.md`) |
-| B | A + prompt `prguard-review-v2` (taxonomy, defect/advisory, abstention) | current branch, `--condition-checks off` | runnable, not measured online |
-| C | B + evidence-aware verifier layer 2 | current branch, `--condition-checks on` (default) | runnable, not measured online |
+| A0 | Recorded v1 output, legacy matcher | `evals.replay_v1` on the archived run | **measured**: P 0.093 / R 0.700 / F1 0.165 |
+| A1 | Same recorded output, unified matcher | `evals.replay_v1` | **measured**: P 0.013 / R 0.100 / F1 0.024 |
+| A2 | Same recorded output through the v2 verifier | `evals.replay_v1` | **measured**: identical to A1, see `docs/ablation-results.md` §3 |
+| B | v2 prompt, layer 1 only | current branch, `--condition-checks off` | runnable, not measured online |
+| C | v2 prompt, layer 1 + layer 2 | current branch, `--condition-checks on` (default) | runnable, not measured online |
 | D | C + conditional critic | — | **not implemented**; would need its own token budget |
 | E | Single agent and static multi-agent on the same prompt | `--strategy single` / `--strategy static` | runnable |
 
-A and B differ in prompt version, B and C differ only in the `condition_checks` flag, so the two
-comparisons isolate one variable each. `PRReviewRequest.condition_checks` is the switch; it is also
-exposed on the eval CLI.
+B and C differ only in the `condition_checks` flag, so that comparison isolates the verifier.
+A→B changes both the prompt and the measurement rule, because prompt v1 could not emit an
+`issue_type`; that comparison must always be labelled as mixed. `PRReviewRequest.condition_checks`
+is the switch, also exposed on the eval CLI.
+
+Before spending anything, verify the plan:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic --dry-run
+```
+
+The dry run prints the strategy list, dataset version, prompt, evaluator, credential presence,
+planned call count, expected wall time and, when `PRGUARD_INPUT_PRICE_PER_1M` /
+`PRGUARD_OUTPUT_PRICE_PER_1M` are set, an estimated cost. It never calls a model.
 
 ## Commands
 
@@ -87,10 +100,14 @@ Fill this in after the measurements exist. Do not invent rows.
 
 | Rung | Prompt | Verifier | Precision | Recall | F1 | Strict precision | Advisory rate | Calls/PR | Input tok/PR | P95 latency |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| A | v1 | layer 1 | 0.093 | 0.700 | 0.165 | n/a | n/a | 2.73 | 3079 | 18.41 s |
+| A0 | v1 | legacy matcher | 0.093 | 0.700 | 0.165 | n/a | n/a | 2.73 | 3079 | 18.41 s |
+| A1 | v1 | layer 1, unified matcher | 0.013 | 0.100 | 0.024 | 0.013 | 0.000 | 2.73 | 3079 | 18.41 s |
+| A2 | v1 | layer 1+2, unified matcher | 0.013 | 0.100 | 0.024 | 0.013 | 0.000 | 2.73 | 3079 | 18.41 s |
 | B | v2 | layer 1 | pending | pending | pending | pending | pending | pending | pending | pending |
 | C | v2 | layer 1+2 | pending | pending | pending | pending | pending | pending | pending | pending |
 | D | v2 | layer 1+2+critic | not implemented | | | | | | | |
 
-Rung A has no strict precision or advisory rate because prompt v1 had no advisory class, so those
-cells are genuinely not applicable rather than missing.
+A0 has no strict precision or advisory rate because prompt v1 had no advisory class, so those cells
+are genuinely not applicable rather than missing. A2 equals A1 because the replay disables the
+trigger-condition rule: prompt v1 cannot emit a trigger, and charging the verifier for a prompt
+limitation would mix two variables.

@@ -77,7 +77,7 @@ The command writes timestamped `results.json`, `results.csv`, `benchmark.md`, an
 uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
 ```
 
-See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run, and [experiments](docs/experiments.md) for the ablation design and cost estimate.
+See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run, and [experiments](docs/experiments.md) for the A/B/C design, [ablation-results](docs/ablation-results.md) for the measured re-scoring, and the `--dry-run` flag for a no-cost plan check.
 
 ## Review quality controls
 
@@ -103,11 +103,27 @@ Layer 2 uses syntax trees, and only uses text matching to *refute* a claim. A fi
 
 | Record | Scope | Result |
 | --- | --- | --- |
-| Offline, current branch | deterministic fixture runner, 15 fixtures, 3 strategies | dynamic P 1.000 / R 1.000 / F1 1.000, 2.73 calls per PR, 10/10 labelled defects |
-| Online, `prguard-review-v1` | DeepSeek `deepseek-chat`, 15 fixtures, dynamic | P 0.093 / R 0.700 / F1 0.165, 7 TP / 68 FP / 3 FN, 3079 input tokens per PR, 10.96 s mean, 18.41 s P95 |
-| Online, `prguard-review-v2` + evidence-aware verifier | same fixtures | **not measured yet**; no online budget has been approved for this branch |
+| Offline, current branch | deterministic fixture runner, 15 fixtures, 3 strategies, evaluator `prguard-eval-v2` | dynamic P 1.000 / R 0.900 / F1 0.947, strict F1 0.900, 9/10 defects, 1 advisory, 2.73 calls per PR |
+| Online `prguard-review-v1`, legacy matcher | DeepSeek `deepseek-chat`, 15 fixtures, dynamic | P 0.093 / R 0.700 / F1 0.165, 7 TP / 68 FP / 3 FN |
+| Same recording, unified matcher | re-scored, no model called | P 0.013 / R 0.100 / F1 0.024, 1 TP / 74 FP / 9 FN |
+| Online `prguard-review-v2` (rungs B and C) | same fixtures | **not measured**; awaiting a token budget |
 
-The offline record is a pipeline regression test, not an LLM quality claim. The online v1 record is the baseline that the audit decomposes: of its 68 false positives, 44 (64.7%) were advice, style preferences or duplicates that the new classification keeps out of the defect count, 15 (22.1%) were real observations the fixtures do not label, and 9 (13.2%) were correct defects lost to the old language-and-line-sensitive matcher.
+Read the ablation document before quoting any of these:
+[docs/ablation-results.md](docs/ablation-results.md).
+
+Three things to keep straight:
+
+* The offline row is a pipeline regression test, not an LLM quality claim.
+* The gap between the two online rows is a **measurement change**, not a model
+  improvement. Prompt v1 emitted no classification and left 34 of 75 findings without
+  a line number, so the unified rule cannot credit them. Reproducing the legacy row
+  exactly is the point of freezing that scorer.
+* Offline recall dropped from 1.000 to 0.900 on purpose: `missing_test_coverage` is
+  now `UNKNOWN` unless the retrieved context contains the test file, because a diff
+  cannot prove that no test exists. The finding is still reported, as an advisory
+  needing human review.
+
+The audit that produced the 44 / 15 / 9 split, and the full per-finding classification, is in [docs/false-positive-analysis.md](docs/false-positive-analysis.md).
 
 
 
