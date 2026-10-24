@@ -1,6 +1,6 @@
 import pytest
 
-from evals.fixtures import load_dataset, snapshot_for
+from evals.fixtures import FixtureClient, load_dataset, snapshot_for
 from evals.metrics import _match_score, evaluate_cases
 from prguard.evidence import CONTRADICTED, SUPPORTED, UNDETERMINED, evaluate_condition
 from prguard.models import (
@@ -243,3 +243,67 @@ def test_labelling_everything_advisory_does_not_hide_false_positives():
     assert result["defect_precision"] == 0.0
     assert result["strict_precision"] == 0.0
     assert result["advisory_rate"] == 1.0
+
+
+def _flow_with_claims(case_id: str, findings: list[Finding], condition_checks: bool):
+    from prguard.flow import ReviewFlow
+    from prguard.models import AgentRun, PRReviewRequest
+
+    case = CASES[case_id]
+    snapshot, sources = snapshot_for(case)
+
+    async def runner(agent, context, model, *, semaphore, timeout_seconds):
+        del context, model, semaphore, timeout_seconds
+        payload = findings if agent == "SecurityAgent" else []
+        return AgentRun(
+            agent=agent,
+            status="success",
+            started_at="now",
+            ended_at="now",
+            calls=1,
+            findings=[item.model_copy(update={"source_agent": agent}) for item in payload],
+        )
+
+    request = PRReviewRequest(
+        repo=snapshot.repo,
+        pr_number=snapshot.pr_number,
+        strategy="static",
+        mode="offline",
+        output_dir="/private/tmp/prguard-ablation",
+        condition_checks=condition_checks,
+    )
+    flow = ReviewFlow(github_client=FixtureClient(snapshot, sources), agent_runner=runner)
+    flow.kickoff(inputs={"request": request.model_dump()})
+    return flow.state
+
+
+def _false_sql_claim() -> Finding:
+    case = CASES["safe-sql-08"]
+    return make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL injection in search",
+        description="Claimed injection on a parameterized query.",
+        evidence="cursor.execute('SELECT * FROM users WHERE name = %s', (name,))",
+    )
+
+
+def test_condition_checks_ablation_changes_the_outcome():
+    with_checks = _flow_with_claims("safe-sql-08", [_false_sql_claim()], True)
+    without_checks = _flow_with_claims("safe-sql-08", [_false_sql_claim()], False)
+
+    assert with_checks.verified_findings == []
+    assert any(error["type"] == "condition_not_met" for error in with_checks.errors)
+
+    assert len(without_checks.verified_findings) == 1
+    assert not any(error["type"] == "condition_not_met" for error in without_checks.errors)
+
+
+def test_flow_records_verifier_before_and_after_counts():
+    state = _flow_with_claims("safe-sql-08", [_false_sql_claim()], True)
+    assert state.metrics["raw_findings"] == 1
+    assert state.metrics["verified_findings"] == 0
+    assert state.metrics["rejected_findings"] == 1

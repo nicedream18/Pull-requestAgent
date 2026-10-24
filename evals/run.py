@@ -38,7 +38,14 @@ def _write_chart(path: Path, summaries: dict[str, dict]) -> None:
     path.write_text("\n".join(pieces) + "\n", encoding="utf-8")
 
 
-def _run_strategy(cases: list[dict], strategy: str, mode: str, output_dir: Path, model: str | None) -> tuple[dict, list[dict]]:
+def _run_strategy(
+    cases: list[dict],
+    strategy: str,
+    mode: str,
+    output_dir: Path,
+    model: str | None,
+    condition_checks: bool = True,
+) -> tuple[dict, list[dict]]:
     case_results: list[dict] = []
     per_case_runs: list[dict] = []
     for case in cases:
@@ -53,6 +60,7 @@ def _run_strategy(cases: list[dict], strategy: str, mode: str, output_dir: Path,
             output_dir=str(output_dir / "reviews" / strategy / case["case_id"]),
             max_agent_calls=6,
             concurrency=3,
+            condition_checks=condition_checks,
         )
         flow = ReviewFlow(github_client=FixtureClient(snapshot, sources), agent_runner=runner)
         flow.kickoff(inputs={"request": request.model_dump()})
@@ -100,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals"))
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--condition-checks",
+        choices=("on", "off"),
+        default="on",
+        help="Disable layer-2 AST condition checks to ablate the verifier.",
+    )
     args = parser.parse_args(argv)
 
     if args.mode == "online" and not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("PRGUARD_API_KEY")):
@@ -116,7 +130,14 @@ def main(argv: list[str] | None = None) -> int:
     summaries: dict[str, dict] = {}
     all_cases: dict[str, list[dict]] = {}
     for strategy in strategies:
-        summary, detail = _run_strategy(cases, strategy, args.mode, output_dir, args.model)
+        summary, detail = _run_strategy(
+            cases,
+            strategy,
+            args.mode,
+            output_dir,
+            args.model,
+            condition_checks=args.condition_checks == "on",
+        )
         summaries[strategy] = summary
         all_cases[strategy] = detail
 

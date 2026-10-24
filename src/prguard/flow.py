@@ -277,7 +277,13 @@ class ReviewFlow(Flow[FlowState]):
         started = time.monotonic()
         if self.snapshot is None or self.request is None:
             return {"run_id": self.state.run_id, "status": "failed"}
-        verified, rejected = verify_findings(self.state.findings, self.snapshot, self.source_map, self.related_paths)
+        verified, rejected = verify_findings(
+            self.state.findings,
+            self.snapshot,
+            self.source_map,
+            self.related_paths,
+            check_conditions=self.request.condition_checks,
+        )
         self.state.verified_findings = verified
         for error in rejected:
             self.state.errors.append(error)

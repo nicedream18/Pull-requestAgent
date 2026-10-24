@@ -77,7 +77,7 @@ The command writes timestamped `results.json`, `results.csv`, `benchmark.md`, an
 uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
 ```
 
-See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, and [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run.
+See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run, and [experiments](docs/experiments.md) for the ablation design and cost estimate.
 
 ## Review quality controls
 

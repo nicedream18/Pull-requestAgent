@@ -72,6 +72,8 @@ class PRReviewRequest(BaseModel):
     concurrency: int = Field(default=3, ge=1, le=8)
     timeout_seconds: int = Field(default=90, ge=5, le=600)
     max_agent_calls: int = Field(default=6, ge=1, le=12)
+    # Ablation switch: disable layer-2 condition checks to measure their effect.
+    condition_checks: bool = True
 
     @model_validator(mode="after")
     def validate_target(self) -> "PRReviewRequest":
