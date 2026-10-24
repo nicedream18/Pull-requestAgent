@@ -1247,3 +1247,18 @@ def test_coverage_levels_require_the_claimed_failure(label, test_source, claim, 
         claim_text=claim,
     )
     assert verdict.status == expected, label
+
+
+def test_agent_prompt_has_no_template_variable_collision():
+    """CrewAI formats the task description with str.format, so literal braces break it."""
+    from prguard import agents
+
+    spec = agents.AGENTS["CodeQualityAgent"]
+    description = (
+        f"scope: {spec['goal']} {spec['issue_types']} {spec['rules']} {agents.SHARED_RULES}"
+        " or an empty findings array when nothing is provable."
+        "\n<untrusted_review_context>\n{review_context}\n</untrusted_review_context>"
+    )
+    # Only the intended placeholder may remain; anything else raises KeyError at runtime.
+    rendered = description.format(review_context="X")
+    assert "{review_context}" not in rendered

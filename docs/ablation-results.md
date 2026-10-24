@@ -1,14 +1,15 @@
 # Ablation Results
 
-Status: **stages 1 and 2 complete, stage 3 prepared but not executed against a paid
-model.** Every number in this file comes from a recorded file or a command that was
-actually run in this workspace. Nothing is projected.
+Status: **one valid real-LLM ablation has been executed. Layer 1 is measured and
+effective; layer 2 measured no effect on this run.** Every number in this file comes
+from a recorded file or a command that was actually run in this workspace. Nothing is
+projected.
 
 - Branch: `feat/false-positive-reduction`
 - Evaluator: `prguard-eval-v2`
-- **Rungs B and C are unmeasured.** The first online attempt aborted with a prompt
-  template error before any model call (§2); the harness itself is unchanged and
-  correct. Nothing in this document is a real-LLM quality result.
+- **One valid online run exists** (§3): 41 calls, USD 0.0289, B and C identical. It is
+  a single run without repetitions, so it supports the layer-1 effect and does not
+  support any claim about layer 2.
 - Dataset: `evals/datasets/prguard_v1.json` v1.0, 15 fixtures (10 labelled defects, 5 clean)
 - Recorded baseline: `artifacts/evals/online/20261024T081509Z/results.json`
   (prompt `prguard-review-v1`, `deepseek/deepseek-chat`, run on 2026-10-24)
@@ -116,10 +117,122 @@ requires a new paid call, so neither has been done.
 
 ### Status
 
-**This run is invalid and must not be cited.** No conclusion about prompt v2, layer 1 or
-layer 2 can be drawn from it. Rungs A, B and C remain unmeasured.
+**This run is invalid and must not be cited.** It is superseded by attempt 2 (§3), which
+ran after the brace fix.
 
-## 3. Re-scoring the recorded v1 run
+## 3. Online run attempt 2 (2026-10-24T10:22:47Z): VALID, the first real result
+
+After escaping the brace collision (§2), the same harness ran once and produced usable
+output. This is the first real-LLM measurement in the project.
+
+| Field | Value |
+| --- | --- |
+| Artifact | `artifacts/evals/ablation/20261024T102247Z/ablation.json` |
+| Mode / model | online / `deepseek/deepseek-chat` |
+| Prompt / evaluator | `prguard-review-v2` / `prguard-eval-v2` |
+| Dataset | `prguard_v1.json` v1.0, 15 fixtures (10 labelled defects) |
+| Git commit at run | `3f5339d` (prompt fix applied, uncommitted at the time) |
+| Model calls | 41, one pass; both rungs replayed the same frozen findings |
+| Failed cases | none |
+| Input / output tokens | 72,197 / 20,768 (92,965 total) |
+| Mean latency / P95 | 8.61 s / 16.74 s per case |
+| Cost at configured price | **USD 0.0289** (0.28 / 0.42 per million) |
+
+### Results
+
+| Rung | P | R | F1 | Strict P | Strict R | Strict F1 | TP | FP | FN | Advisories | Rejections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A-raw (no verifier) | 0.160 | 0.400 | 0.229 | 0.143 | 0.400 | 0.211 | 4 | 21 | 6 | 3 | 0 |
+| B (layer 1) | 0.667 | 0.400 | 0.500 | 0.571 | 0.400 | 0.471 | 4 | 2 | 6 | 1 | 21 |
+| C (layer 1 + 2) | 0.667 | 0.400 | 0.500 | 0.571 | 0.400 | 0.471 | 4 | 2 | 6 | 1 | 21 |
+
+Other measurements: 1.87 findings per PR raw, 0.47 after layer 1; 0.60 false positives
+per clean PR raw, 0.00 after layer 1; verifier rejection rate 21/28 = 75%;
+`match_channels` = 4 structured, 0 text.
+
+### What layer 1 actually removed
+
+**All 21 rejections were `invalid_path`.** The model did not fabricate claims about the
+wrong code; it failed to name the file it was talking about:
+
+| Reported `file_path` | Cases | Example |
+| --- | ---: | --- |
+| `'unknown'` | 12 findings | `null-deref-01`, `boundary-03`, `division-zero-12` |
+| `''` (empty string) | 2 findings | `boundary-03`, `shell-injection-06` |
+| basename only | 1 finding | `export.py` instead of `app/export.py` |
+| a different file | 1 finding | `app/users.py` (does not exist in the fixture) |
+| `'unknown (...)'` free text | 1 finding | `unknown (transfer_funds implementation, ...)` |
+
+The path is present in the context: the diff header is `diff -- app/profile.py
+(modified)`. The model still answered `unknown`, so this is a genuine agent failure, not
+a context gap.
+
+### What layer 2 actually did: nothing measurable
+
+B and C have identical TP, FP, FN, precision, recall and F1. Layer 2 ran on the 7
+surviving findings and produced:
+
+* 0 rejections
+* 0 demotions to advisory
+* 6 confirmations, changing `verification_status` from `uncertain` to `verified`
+
+So layer 2 confirmed what layer 1 had already accepted. It did not remove a single
+false positive on this run, because layer 1 had already removed all of them.
+
+`verification_status` is not part of the matcher, which is why the scores are identical.
+A future evaluator could score `verified` only, but that would change the metric and is
+out of scope here.
+
+### The two remaining false positives are duplicates, not wrong claims
+
+| Case | Surviving findings | Truths | TP | FP |
+| --- | ---: | ---: | ---: | ---: |
+| `permissions-11` | 2 (`0o777` reported twice, different wording) | 1 | 1 | 1 |
+| `secret-14` | 2 defects + 1 advisory (same token, three times) | 1 | 1 | 1 |
+
+Both survivors describe the real defect. `_same_issue` did not merge them because the
+Chinese wording differs and the line numbers differ, so text overlap fell below 0.42.
+So precision 0.667 understates claim quality: **6 of 6 surviving defect claims are
+correct**, and the 2 FPs are a deduplication miss.
+
+### Why recall is 0.400, not the offline 0.900
+
+Six labelled defects were missed. The cause is almost entirely the path field:
+
+| Case | Raw findings | Surviving | Cause |
+| --- | ---: | ---: | --- |
+| `null-deref-01` | 3 | 0 | all three used `path='unknown'` |
+| `boundary-03` | 2 | 0 | `path=''` and `path='unknown'` |
+| `division-zero-12` | 1 | 0 | `path='unknown'` |
+| `test-gap-07` | 1 | 0 | `path='unknown (...)'` |
+| `resource-leak-04` | 2 | 0 | `path='export.py'`, a basename of `app/export.py` |
+| `exception-02` | 0 | 0 | the model produced no finding at all |
+
+So five misses are usable-content-discarded-on-path, and one is a genuine detection
+miss. Only `resource-leak-04` is arguably over-strict: the basename identifies the file
+unambiguously inside a single-file diff.
+
+### Real LLM versus offline fixtures
+
+| Metric | Offline (deterministic runner) | Online (DeepSeek) |
+| --- | ---: | ---: |
+| Precision | 1.000 | 0.667 |
+| Recall | 0.900 | 0.400 |
+| F1 | 0.947 | 0.500 |
+| Findings per PR | 0.67 | 1.87 raw / 0.47 after layer 1 |
+| Rejections | 0 | 21 of 28 |
+
+The offline number is a pipeline regression test; the gap shows that the regex runner
+always emits a correct path, which is precisely what the real model fails at.
+
+### Limitations of this run
+
+1. One run, no repetitions, so no variance estimate. The 4 TPs could plausibly move by
+   one case between runs.
+2. 15 fixtures, one labelled defect each. Precision is label-restricted.
+3. The prompt fix was applied immediately before this run and is part of it.
+
+## 4. Re-scoring the recorded v1 run
 
 Command actually run:
 
@@ -170,15 +283,16 @@ count of 0 is therefore expected, not evidence that layer 1 is inert.
 **This difference must not be reported as an improvement.** The v1 pipeline is
 penalised by the unified matcher largely because it cannot express what it found.
 
-## 4. Rungs
+## 5. Rungs
 
 | Rung | Configuration | Status | Precision | Recall | F1 |
 | --- | --- | --- | ---: | ---: | ---: |
 | A0 | v1 output, legacy matcher | measured (recorded file) | 0.093 | 0.700 | 0.165 |
 | A1 | v1 output, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
 | A2 | v1 output through the v2 verifier, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
-| B | v2 prompt, layer 1 only (`--condition-checks off`) | **not run**; attempt 1 aborted before any model call (§2) | — | — | — |
-| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **not run**; same blocker | — | — | — |
+| A-raw | v2 output, before any verification | measured (§3, attempt 2) | 0.160 | 0.400 | 0.229 |
+| B | v2 prompt, layer 1 only (`--condition-checks off`) | **measured** (§3, attempt 2) | 0.667 | 0.400 | 0.500 |
+| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **measured** (§3, attempt 2) | 0.667 | 0.400 | 0.500 |
 | D | C + conditional critic | not implemented | — | — | — |
 
 A2 is identical to A1 because `require_trigger=False` is passed during replay: prompt
@@ -191,7 +305,7 @@ isolate a real effect, because they share the same prompt and differ only in the
 `condition_checks` flag. B/A comparisons mix a prompt change with a measurement
 change and must be labeled as such.
 
-## 5. Guard soundness, before and after
+## 6. Guard soundness, before and after
 
 Every row below was reproduced as a wrong `CONTRADICTED` — that is, a real defect being
 rejected — before it was fixed. The right column is the current answer.
@@ -211,7 +325,7 @@ Test coverage follows the same principle: a `pytest.raises` block proves that *s
 failure is tested, not the failure the finding describes. `test-gap-07` therefore stays
 `UNKNOWN` in every offline run.
 
-## 6. The single offline false negative
+## 7. The single offline false negative
 
 `dynamic` recall is 0.900 rather than 1.000, and exactly one labelled defect is
 unconfirmed: `test-gap-07` (`missing_test_coverage`).
@@ -236,7 +350,7 @@ a `pytest.raises` around the function refutes the gap, a happy-path call or a ba
 mention does not. The expected effect of that retrieval work is one labelled defect
 moving from advisory back to confirmed, not a change to the metric.
 
-## 7. Offline baseline after all changes
+## 8. Offline baseline after all changes
 
 Command:
 
@@ -263,7 +377,7 @@ still reported, as an advisory flagged for human review, and `advisory_rate` sho
 the trade explicitly. The CI assertion was updated to permit exactly this one miss
 and to fail on any other change.
 
-## 8. Verifier contribution, measured without an LLM
+## 9. Verifier contribution, measured without an LLM
 
 The layer-1/layer-2 split is covered by tests rather than by the replay, because the
 recording has already been through a verifier. `tests/test_false_positive_controls.py`
@@ -278,7 +392,7 @@ fixture:
 That is a real, reproducible measurement of layer 2, but it is one synthetic claim.
 It shows the mechanism works; it does not quantify the FP reduction on live output.
 
-## 9. Cost
+## 10. Cost
 
 Measured from the recorded v1 run:
 
@@ -302,7 +416,7 @@ cost              : estimated USD 0.0285 per run at the configured price
 
 The price is a configured parameter, not an invoice. No billed amount is claimed.
 
-## 10. Why the offline mode cannot substitute for B and C
+## 11. Why the offline mode cannot substitute for B and C
 
 `--mode offline` replaces the agents with `OfflineFixtureRunner`, a deterministic regex
 runner that ignores the prompt. Its output therefore says nothing about prompt v2, and
@@ -314,7 +428,7 @@ model pass and freezes the output before any verification, then replays the same
 findings through both verifier configurations. No second model call, so no model
 nondeterminism can enter the B/C comparison.
 
-## 11. Limitations
+## 12. Limitations
 
 1. **15 fixtures.** Each labelled case holds exactly one defect. A correct but
    unlabelled observation is still charged as a false positive, which caps the
@@ -344,7 +458,7 @@ nondeterminism can enter the B/C comparison.
    A wrong `SUPPORTED` shows up as a false positive; a wrong `CONTRADICTED` would
    remove a real defect, so the checks are written to prefer `UNKNOWN`.
 
-## 12. The B/C harness
+## 13. The B/C harness
 
 `evals/ablation.py` implements the shared-input requirement:
 
@@ -374,9 +488,23 @@ about layer 2's effect on real model output. `test_ablation_replays_the_same_raw
 covers the mechanism with a synthetic false SQL claim: B keeps it (`fp=1`), C rejects
 it (`condition_not_met`, `fp=0`), and the shared input is byte-identical afterwards.
 
-## 13. Is a critic worth adding?
+## 14. Is a critic worth adding?
 
-Not yet, and the current data argues against it:
+**No, the measured data argues against it.**
+
+* Layer 1 removed 21 of 28 findings (75%) and layer 2 removed none, so the noise this
+  run produced was already gone before any adjudication would begin.
+* Recall fell to 0.400, and five of the six misses were caused by the model writing
+  `unknown` as the file path. A critic reviewing an `unknown`-path finding cannot
+  recover a defect either: it has no location to check. Fixing the path field is a
+  prompt/schema problem, not an adjudication problem.
+* A critic would add roughly one call per surviving finding for zero measured gain on
+  this dataset.
+* The remaining two false positives are duplicates of true defects, which is a
+  deduplication-threshold issue, not a reasoning issue.
+
+Reconsider a critic only after the path-field problem is solved and C's advisory rate
+is high while recall is already acceptable. Earlier reasoning, still valid:
 
 * Layer 2 already rejects or demotes every claim it can decide; the undecided
   remainder is `UNKNOWN`, which is exactly the population a critic would review.
@@ -391,7 +519,7 @@ Not yet, and the current data argues against it:
 Recommendation: run B and C, and only consider a critic if C's advisory rate is high
 while its defect recall is already acceptable.
 
-## 14. Paid-run safety
+## 15. Paid-run safety
 
 Verified before any spend:
 
@@ -406,7 +534,7 @@ Verified before any spend:
 | Duplicate spend | impossible by design: both rungs replay the same frozen findings | `_replay_verifier` |
 | Artifacts | `ablation.json` with raw findings, per-rung verified findings, rejection reasons, tokens, calls, latency | `output_dir` |
 
-## 15. Next command, pending budget approval
+## 16. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens

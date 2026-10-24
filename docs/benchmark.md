@@ -23,7 +23,22 @@ regression, and `docs/ablation-results.md` §4 states it as such.
 Single and static strategies are evaluated with the same evaluator, so the comparison is
 like-for-like. Single confirms 5 of 10 because one agent only covers its own scope.
 
-## Online LLM record
+## Online LLM record (prompt v2, current code)
+
+One valid run, 2026-10-24T10:22:47Z, `deepseek/deepseek-chat`, evaluator `prguard-eval-v2`,
+15 fixtures, one model pass with both verifier rungs replayed on the same findings:
+
+| Rung | P | R | F1 | Strict F1 | TP | FP | FN | Rejections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before verification | 0.160 | 0.400 | 0.229 | 0.211 | 4 | 21 | 6 | 0 |
+| layer 1 | 0.667 | 0.400 | 0.500 | 0.471 | 4 | 2 | 6 | 21 |
+| layer 1 + 2 | 0.667 | 0.400 | 0.500 | 0.471 | 4 | 2 | 6 | 21 |
+
+21 of 21 rejections were `invalid_path`. 72,197 input and 20,768 output tokens, 41 calls,
+8.61 s mean and 16.74 s P95 per case, USD 0.0289 at the configured price. Full analysis:
+[ablation-results](ablation-results.md) §3.
+
+## Online LLM record (prompt v1, historical)
 
 > **Status:** this record belongs to prompt `prguard-review-v1` with the layer-1-only verifier and
 > the pre-`prguard-eval-v2` matcher. Its 0.093 / 0.700 / 0.165 is reproduced exactly by the frozen

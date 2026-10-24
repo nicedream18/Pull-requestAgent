@@ -152,7 +152,7 @@ async def run_agent_once(agent_name: str, context: str, model: str | None) -> tu
             f"{SHARED_RULES}\n"
             "Write each finding title, description, trigger_condition, expected_behavior, actual_behavior "
             "and suggestion in Simplified Chinese. Keep evidence verbatim from the source, including its "
-            "original language. Return JSON matching AgentFindings, or {\"findings\": []} when nothing is provable.\n\n"
+            "original language. Return JSON matching AgentFindings, or an empty findings array when nothing is provable.\n\n"
             "<untrusted_review_context>\n{review_context}\n</untrusted_review_context>"
         ),
         expected_output=(

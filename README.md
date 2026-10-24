@@ -123,7 +123,9 @@ plumbing only and says nothing about prompt quality.
 | Offline, current branch | deterministic fixture runner, 15 fixtures, 3 strategies, evaluator `prguard-eval-v2` | dynamic P 1.000 / R 0.900 / F1 0.947, strict F1 0.900, 9/10 defects, 1 advisory, 2.73 calls per PR |
 | Online `prguard-review-v1`, legacy matcher | DeepSeek `deepseek-chat`, 15 fixtures, dynamic | P 0.093 / R 0.700 / F1 0.165, 7 TP / 68 FP / 3 FN |
 | Same recording, unified matcher | re-scored, no model called | P 0.013 / R 0.100 / F1 0.024, 1 TP / 74 FP / 9 FN |
-| Online `prguard-review-v2` (rungs B and C) | same fixtures | **not measured**; awaiting a token budget |
+| Online `prguard-review-v2`, before verification | DeepSeek `deepseek-chat`, 15 fixtures, one pass | P 0.160 / R 0.400 / F1 0.229, 4 TP / 21 FP / 6 FN, 28 findings |
+| Online `prguard-review-v2`, layer 1 (rung B) | same frozen findings | P 0.667 / R 0.400 / F1 0.500, 4 TP / 2 FP / 6 FN, 21 rejected |
+| Online `prguard-review-v2`, layer 1 + 2 (rung C) | same frozen findings | identical to B: layer 2 rejected nothing on this run |
 
 Read the ablation document before quoting any of these:
 [docs/ablation-results.md](docs/ablation-results.md).
@@ -139,6 +141,13 @@ Three things to keep straight:
   now `UNKNOWN` unless the retrieved context contains the test file, because a diff
   cannot prove that no test exists. The finding is still reported, as an advisory
   needing human review.
+* The online precision gain comes from one mechanism: the model wrote `unknown`, an
+  empty string or a bare basename as `file_path` in 21 of 28 findings, and layer 1
+  rejected them. It did not remove any claim about the wrong code. Recall is 0.400
+  because five of the six missed defects were discarded for that same reason.
+* Layer 2 measured zero effect: it confirmed six claims (`uncertain` to `verified`) and
+  rejected none, so B and C score identically. Do not describe layer 2 as reducing
+  false positives.
 
 The audit that produced the 44 / 15 / 9 split, and the full per-finding classification, is in [docs/false-positive-analysis.md](docs/false-positive-analysis.md).
 
