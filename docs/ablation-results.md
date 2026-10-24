@@ -6,9 +6,9 @@ actually run in this workspace. Nothing is projected.
 
 - Branch: `feat/false-positive-reduction`
 - Evaluator: `prguard-eval-v2`
-- **Rungs B and C are still unmeasured.** `evals.ablation` is the harness that will
-  produce them from a single model pass; it has only been run with the deterministic
-  offline runner.
+- **Rungs B and C are unmeasured.** The first online attempt aborted with a prompt
+  template error before any model call (§2); the harness itself is unchanged and
+  correct. Nothing in this document is a real-LLM quality result.
 - Dataset: `evals/datasets/prguard_v1.json` v1.0, 15 fixtures (10 labelled defects, 5 clean)
 - Recorded baseline: `artifacts/evals/online/20261024T081509Z/results.json`
   (prompt `prguard-review-v1`, `deepseek/deepseek-chat`, run on 2026-10-24)
@@ -48,7 +48,78 @@ actually run in this workspace. Nothing is projected.
 are reported alongside, so a precision gain bought by rejecting output shows up as
 a recall loss in the same table.
 
-## 2. Re-scoring the recorded v1 run
+## 2. Online run attempt 1 (2026-10-24T10:19:06Z): INVALID, zero cost
+
+The first authorized online ablation executed and produced **no findings at all**. It
+is recorded here as an invalid run, not as a result.
+
+| Field | Value |
+| --- | --- |
+| Artifact | `artifacts/evals/ablation/20261024T101906Z/ablation.json` |
+| Mode / model | online / `deepseek/deepseek-chat` |
+| Prompt / evaluator | `prguard-review-v2` / `prguard-eval-v2` |
+| Cases | 15 |
+| Agent invocations attempted | 41 |
+| Agent invocations completed | 0 |
+| Tokens consumed | **0** |
+| Recorded latency | 0.52 s per case |
+| Estimated spend | **USD 0.00** |
+| Rung A / B / C | 0 TP, 0 FP, 10 FN each |
+
+### Failure mode
+
+Every agent raised before reaching the model:
+
+```
+ValueError: CodeQualityAgent: Missing required template variable '"findings"' in description
+```
+
+41 ValueError entries across the 15 cases, `agent_runs` empty, `token_usage` zero. The
+0.52 s per-case latency and the zero token count together confirm no HTTP request was
+made, so the attempt cost nothing.
+
+### Root cause
+
+The prompt-v2 task description contains a literal JSON example:
+
+```python
+"... Return JSON matching AgentFindings, or {\"findings\": []} when nothing is provable."
+```
+
+CrewAI interpolates the task description with `str.format(**inputs)`. The braces around
+`{"findings": []}` are read as a format field named `"findings"` with spec ` []`, which
+is not in the inputs, so `.format` raises `KeyError` and CrewAI re-raises it as a
+missing template variable. Reproduced directly:
+
+```python
+>>> 'or {"findings": []} when'.format(review_context="X")
+KeyError: '"findings"'
+>>> 'or {{"findings": []}} when'.format(review_context="X")
+'or {"findings": []} when'
+```
+
+A brace scan of the runtime description found exactly two groups: the intended
+`{review_context}` and the unintended `{"findings": []}`.
+
+### Why the offline runs never caught it
+
+`--mode offline` substitutes `OfflineFixtureRunner`, which returns `AgentRun` objects
+directly and never builds a CrewAI `Task`. The template interpolation therefore only
+happens in `--mode online`, which had never been executed before this attempt.
+
+### Fix, not yet applied
+
+Escaping the braces (`{{"findings": []}}`) or rewording the sentence to avoid a literal
+object (for example "or an empty findings array") both resolve it. Both are edits to
+the prompt, which is out of scope for this round without approval, and re-running
+requires a new paid call, so neither has been done.
+
+### Status
+
+**This run is invalid and must not be cited.** No conclusion about prompt v2, layer 1 or
+layer 2 can be drawn from it. Rungs A, B and C remain unmeasured.
+
+## 3. Re-scoring the recorded v1 run
 
 Command actually run:
 
@@ -99,15 +170,15 @@ count of 0 is therefore expected, not evidence that layer 1 is inert.
 **This difference must not be reported as an improvement.** The v1 pipeline is
 penalised by the unified matcher largely because it cannot express what it found.
 
-## 3. Rungs
+## 4. Rungs
 
 | Rung | Configuration | Status | Precision | Recall | F1 |
 | --- | --- | --- | ---: | ---: | ---: |
 | A0 | v1 output, legacy matcher | measured (recorded file) | 0.093 | 0.700 | 0.165 |
 | A1 | v1 output, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
 | A2 | v1 output through the v2 verifier, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
-| B | v2 prompt, layer 1 only (`--condition-checks off`) | **not run**; harness ready (`evals.ablation`) | — | — | — |
-| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **not run**; harness ready (`evals.ablation`) | — | — | — |
+| B | v2 prompt, layer 1 only (`--condition-checks off`) | **not run**; attempt 1 aborted before any model call (§2) | — | — | — |
+| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **not run**; same blocker | — | — | — |
 | D | C + conditional critic | not implemented | — | — | — |
 
 A2 is identical to A1 because `require_trigger=False` is passed during replay: prompt
@@ -120,7 +191,7 @@ isolate a real effect, because they share the same prompt and differ only in the
 `condition_checks` flag. B/A comparisons mix a prompt change with a measurement
 change and must be labeled as such.
 
-## 4. Guard soundness, before and after
+## 5. Guard soundness, before and after
 
 Every row below was reproduced as a wrong `CONTRADICTED` — that is, a real defect being
 rejected — before it was fixed. The right column is the current answer.
@@ -140,7 +211,7 @@ Test coverage follows the same principle: a `pytest.raises` block proves that *s
 failure is tested, not the failure the finding describes. `test-gap-07` therefore stays
 `UNKNOWN` in every offline run.
 
-## 5. The single offline false negative
+## 6. The single offline false negative
 
 `dynamic` recall is 0.900 rather than 1.000, and exactly one labelled defect is
 unconfirmed: `test-gap-07` (`missing_test_coverage`).
@@ -165,7 +236,7 @@ a `pytest.raises` around the function refutes the gap, a happy-path call or a ba
 mention does not. The expected effect of that retrieval work is one labelled defect
 moving from advisory back to confirmed, not a change to the metric.
 
-## 6. Offline baseline after all changes
+## 7. Offline baseline after all changes
 
 Command:
 
@@ -192,7 +263,7 @@ still reported, as an advisory flagged for human review, and `advisory_rate` sho
 the trade explicitly. The CI assertion was updated to permit exactly this one miss
 and to fail on any other change.
 
-## 7. Verifier contribution, measured without an LLM
+## 8. Verifier contribution, measured without an LLM
 
 The layer-1/layer-2 split is covered by tests rather than by the replay, because the
 recording has already been through a verifier. `tests/test_false_positive_controls.py`
@@ -207,7 +278,7 @@ fixture:
 That is a real, reproducible measurement of layer 2, but it is one synthetic claim.
 It shows the mechanism works; it does not quantify the FP reduction on live output.
 
-## 8. Cost
+## 9. Cost
 
 Measured from the recorded v1 run:
 
@@ -231,7 +302,7 @@ cost              : estimated USD 0.0285 per run at the configured price
 
 The price is a configured parameter, not an invoice. No billed amount is claimed.
 
-## 9. Why the offline mode cannot substitute for B and C
+## 10. Why the offline mode cannot substitute for B and C
 
 `--mode offline` replaces the agents with `OfflineFixtureRunner`, a deterministic regex
 runner that ignores the prompt. Its output therefore says nothing about prompt v2, and
@@ -243,7 +314,7 @@ model pass and freezes the output before any verification, then replays the same
 findings through both verifier configurations. No second model call, so no model
 nondeterminism can enter the B/C comparison.
 
-## 10. Limitations
+## 11. Limitations
 
 1. **15 fixtures.** Each labelled case holds exactly one defect. A correct but
    unlabelled observation is still charged as a false positive, which caps the
@@ -273,7 +344,7 @@ nondeterminism can enter the B/C comparison.
    A wrong `SUPPORTED` shows up as a false positive; a wrong `CONTRADICTED` would
    remove a real defect, so the checks are written to prefer `UNKNOWN`.
 
-## 11. The B/C harness
+## 12. The B/C harness
 
 `evals/ablation.py` implements the shared-input requirement:
 
@@ -303,7 +374,7 @@ about layer 2's effect on real model output. `test_ablation_replays_the_same_raw
 covers the mechanism with a synthetic false SQL claim: B keeps it (`fp=1`), C rejects
 it (`condition_not_met`, `fp=0`), and the shared input is byte-identical afterwards.
 
-## 12. Is a critic worth adding?
+## 13. Is a critic worth adding?
 
 Not yet, and the current data argues against it:
 
@@ -320,7 +391,7 @@ Not yet, and the current data argues against it:
 Recommendation: run B and C, and only consider a critic if C's advisory rate is high
 while its defect recall is already acceptable.
 
-## 13. Paid-run safety
+## 14. Paid-run safety
 
 Verified before any spend:
 
@@ -335,7 +406,7 @@ Verified before any spend:
 | Duplicate spend | impossible by design: both rungs replay the same frozen findings | `_replay_verifier` |
 | Artifacts | `ablation.json` with raw findings, per-rung verified findings, rejection reasons, tokens, calls, latency | `output_dir` |
 
-## 14. Next command, pending budget approval
+## 15. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens
