@@ -110,7 +110,8 @@ def test_a_happy_path_test_is_not_failure_path_coverage():
         ),
     ],
 )
-def test_a_failure_path_assertion_refutes_the_gap(label, source):
+def test_a_failure_path_assertion_alone_does_not_refute_the_gap(label, source):
+    """A raises-block proves *some* failure is tested, not the claimed one."""
     case = CASES["test-gap-07"]
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
@@ -118,30 +119,46 @@ def test_a_failure_path_assertion_refutes_the_gap(label, source):
         case["line_range"][0],
         test_sources={"tests/test_transfers.py": source},
     )
-    assert verdict.status == CONTRADICTED, label
-    assert "asserts an exception" in verdict.reason
+    assert verdict.status == UNKNOWN, label
+    assert "does not name that failure" in verdict.reason
 
 
-def test_an_unrelated_test_file_does_not_refute_a_test_gap():
-    """A test file that exists but never touches this function proves nothing."""
+def test_a_failure_path_assertion_refutes_the_gap_only_when_it_matches_the_claim():
     case = CASES["test-gap-07"]
+    source = "import pytest\n\ndef test_failure():\n    with pytest.raises(ValueError):\n        transfer_funds(a, b, -1)\n"
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
         case["code"],
         case["line_range"][0],
-        test_sources={"tests/test_unrelated.py": "def test_something_else():\n    assert True\n"},
+        test_sources={"tests/test_transfers.py": source},
+        claim_text="transfer_funds raises ValueError when amount <= 0",
+    )
+    assert verdict.status == CONTRADICTED
+    assert "ValueError" in verdict.reason
+
+
+def test_a_raised_exception_of_a_different_type_does_not_refute_the_claim():
+    case = CASES["test-gap-07"]
+    source = "import pytest\n\ndef test_failure():\n    with pytest.raises(KeyError):\n        transfer_funds(a, b, -1)\n"
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        case["code"],
+        case["line_range"][0],
+        test_sources={"tests/test_transfers.py": source},
+        claim_text="transfer_funds raises ValueError when amount <= 0",
     )
     assert verdict.status == UNKNOWN
-    assert "do not call" in verdict.reason
 
 
-def test_an_unrelated_test_calling_its_own_function_does_not_help():
+def test_a_raises_block_around_another_function_does_not_refute_the_gap():
     case = CASES["test-gap-07"]
+    source = "import pytest\n\ndef test_other():\n    with pytest.raises(ValueError):\n        charge_card(-1)\n"
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
         case["code"],
         case["line_range"][0],
-        test_sources={"tests/test_transfers.py": "def test_other():\n    charge_card(1)\n"},
+        test_sources={"tests/test_transfers.py": source},
+        claim_text="transfer_funds raises ValueError",
     )
     assert verdict.status == UNKNOWN
 
@@ -707,6 +724,35 @@ def test_test_gap_is_refuted_when_the_context_contains_the_test_file():
         description="debit 与 credit 之间存在部分失败风险，但没有测试覆盖。",
     )
     verified, rejected = verify_findings([finding], snapshot, sources)
+    # A raises-block exists, but the finding does not name that failure, so the
+    # claim stays unverified instead of being refuted.
+    assert rejected == []
+    assert verified[0].finding_type is FindingType.ADVISORY
+    assert "does not name that failure" in (verified[0].rejection_reason or "")
+
+
+def test_verifier_refutes_the_gap_when_the_claim_names_the_asserted_exception():
+    case = CASES["test-gap-07"]
+    snapshot, sources = snapshot_for(case)
+    sources = dict(sources)
+    sources["tests/test_transfers.py"] = (
+        "import pytest\n\n"
+        "def test_partial_failure():\n"
+        "    with pytest.raises(RuntimeError):\n"
+        "        transfer_funds(a, b, 1)\n"
+    )
+    finding = make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(case, 2),
+        category="testing",
+        issue_type=IssueType.MISSING_TEST_COVERAGE,
+        title="transfer 的 RuntimeError 失败路径缺少测试",
+        description="credit 失败时 transfer_funds 会抛出 RuntimeError，但没有测试覆盖。",
+        trigger_condition="credit 失败抛 RuntimeError",
+    )
+    verified, rejected = verify_findings([finding], snapshot, sources)
     assert verified == []
     assert rejected[0]["type"] == "condition_not_met"
 
@@ -1047,3 +1093,157 @@ def test_kwargs_unpacking_does_not_clear_a_shell_claim():
     verdict = evaluate_condition(IssueType.UNSAFE_COMMAND, source, 4)
     assert verdict.status == UNKNOWN
     assert "keyword-argument unpacking" in verdict.reason
+
+
+# --- boundary guard soundness ------------------------------------------------
+
+
+def test_inclusive_positive_guard_does_not_protect_the_index_equal_to_length():
+    """`if i <= len(x)` admits the out-of-range iteration, so it is not a guard."""
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i <= len(items):\n"
+        "            print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_reject_guard_with_strict_greater_than_does_not_protect():
+    """`if i > len(x): break` lets i == len(x) through, which is the bad value."""
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i > len(items):\n"
+        "            break\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "label,guard",
+    [
+        ("greater-or-equal", "if i >= len(items):\n            break"),
+        ("greater-than-len-minus-1", "if i > len(items) - 1:\n            break"),
+        ("equal-to-length", "if i == len(items):\n            break"),
+    ],
+)
+def test_sufficient_reject_guards_are_recognised(label, guard):
+    source = f"def f(items):\n    for i in range(len(items) + 1):\n        {guard}\n        print(items[i])\n"
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == CONTRADICTED, label
+
+
+def test_a_guard_covering_only_one_of_two_reads_does_not_protect():
+    """The unguarded second read can still go out of range."""
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i < len(items):\n"
+        "            print(items[i])\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_a_guard_placed_after_the_read_does_not_protect():
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        print(items[i])\n"
+        "        if i >= len(items):\n"
+        "            break\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_a_break_inside_a_nested_loop_does_not_exit_the_analysed_loop():
+    """The break leaves the inner `while`, so the outer iteration still reads."""
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        while True:\n"
+        "            if i >= len(items):\n"
+        "                break\n"
+        "            break\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_a_conditional_break_does_not_count_as_always_exiting():
+    """`if i >= len(x): if strict: break` does not exit on every path."""
+    source = (
+        "def f(items, strict):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i >= len(items):\n"
+        "            if strict:\n"
+        "                break\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_a_guard_whose_else_branch_also_exits_is_accepted():
+    source = (
+        "def f(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i >= len(items):\n"
+        "            break\n"
+        "        else:\n"
+        "            continue\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == CONTRADICTED
+
+
+# --- test coverage: reference is not coverage --------------------------------
+
+
+@pytest.mark.parametrize(
+    "label,test_source,claim,expected",
+    [
+        (
+            "raises, no claim text",
+            "import pytest\ndef test_x():\n    with pytest.raises(ValueError):\n        transfer_funds(a, b, -1)\n",
+            "",
+            UNKNOWN,
+        ),
+        (
+            "raises, claim names it",
+            "import pytest\ndef test_x():\n    with pytest.raises(ValueError):\n        transfer_funds(a, b, -1)\n",
+            "transfer_funds raises ValueError",
+            CONTRADICTED,
+        ),
+        (
+            "happy path only",
+            "def test_x():\n    transfer_funds(a, b, 1)\n",
+            "transfer_funds raises ValueError",
+            UNKNOWN,
+        ),
+        (
+            "bare mention",
+            "from app.transfers import transfer_funds\n",
+            "transfer_funds raises ValueError",
+            UNKNOWN,
+        ),
+    ],
+)
+def test_coverage_levels_require_the_claimed_failure(label, test_source, claim, expected):
+    risky = "def transfer_funds(source, target, amount):\n    source.debit(amount)\n    target.credit(amount)\n"
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        risky,
+        1,
+        test_sources={"tests/test_transfers.py": test_source},
+        claim_text=claim,
+    )
+    assert verdict.status == expected, label

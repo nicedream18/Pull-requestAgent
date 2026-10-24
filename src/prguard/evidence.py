@@ -89,6 +89,9 @@ class ConditionContext:
     test_sources: dict[str, str] | None = None
     # Name of the function that encloses the reported line, when resolvable.
     function_name: str | None = None
+    # The finding's own words about which behaviour fails, used to decide whether a
+    # retrieved failure-path test actually covers the claimed failure.
+    claim_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -702,82 +705,188 @@ def _zero_guarded(scope: ast.AST, name: str, use_line: int) -> bool:
     return False
 
 
-def _dominating_guard(loop: ast.For, index: str, reads: list[ast.Subscript]) -> ast.If | None:
-    """Return the bounds check that actually protects every read of `index`.
+def _nested_loop_node_ids(loop: ast.For) -> set[int]:
+    """Ids of every node inside a loop nested in `loop`.
 
-    Position matters: a rejecting guard (`if i >= len(x): break`) only protects reads
-    that come after it, and a positive guard (`if i < len(x):`) only protects reads
-    inside its body.
+    A `break` inside a nested loop leaves that inner loop, not the loop under
+    analysis, so a guard found there must not be used as evidence for the outer one.
     """
-    exits = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    ids: set[int] = set()
+    for child in ast.walk(loop):
+        if child is loop or not isinstance(child, (ast.For, ast.AsyncFor, ast.While)):
+            continue
+        for sub in ast.walk(child):
+            ids.add(id(sub))
+    return ids
+
+
+def _body_always_exits(body: list[ast.stmt]) -> bool:
+    """True only when every path through `body` leaves the current scope.
+
+    A statement that merely *contains* a break or return is not enough: statements
+    before an unconditional exit fall through to it, but an `if` without an `else`
+    cannot be assumed to exit.
+    """
+    for statement in body:
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            return True
+        if isinstance(statement, ast.If) and statement.orelse:
+            if _body_always_exits(statement.body) and _body_always_exits(statement.orelse):
+                return True
+    return False
+
+
+def _loop_bound_is_len_plus_one(loop: ast.For, index: str) -> bool:
+    """`for i in range(len(x) + 1)` is the only shape where `i == len(x)` is the bad value."""
+    iterable = loop.iter
+    if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
+        return False
+    arg = iterable.args[0]
+    return (
+        isinstance(arg, ast.BinOp)
+        and isinstance(arg.op, ast.Add)
+        and isinstance(arg.right, ast.Constant)
+        and arg.right.value == 1
+        and isinstance(arg.left, ast.Call)
+        and _dotted(arg.left.func) == "len"
+    )
+
+
+def _rejects_out_of_range(test: ast.AST, index: str, loop: ast.For) -> bool:
+    """True when the condition sends an out-of-range `index` out of the iteration.
+
+    Only these forms are sufficient for `range(len(x) + 1)`:
+
+    * ``i >= len(x)``          rejects i == len(x) and above
+    * ``i > len(x) - 1``       same set, written differently
+    * ``i == len(x)``          rejects exactly the one value that loop can produce
+
+    ``i > len(x)`` is *not* sufficient: it lets i == len(x) through, which is the
+    out-of-range iteration itself.
+    """
+    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name):
+        return False
+    if test.left.id != index or len(test.ops) != 1 or not test.comparators:
+        return False
+    op = test.ops[0]
+    right = test.comparators[0]
+
+    if isinstance(right, ast.Call) and _dotted(right.func) == "len":
+        if isinstance(op, ast.GtE):
+            return True
+        if isinstance(op, ast.Eq):
+            return _loop_bound_is_len_plus_one(loop, index)
+        return False
+
+    if (
+        isinstance(op, ast.Gt)
+        and isinstance(right, ast.BinOp)
+        and isinstance(right.op, ast.Sub)
+        and isinstance(right.left, ast.Call)
+        and _dotted(right.left.func) == "len"
+        and isinstance(right.right, ast.Constant)
+        and right.right.value == 1
+    ):
+        return True
+    return False
+
+
+def _guards_positive(test: ast.AST, index: str) -> bool:
+    """True only for `if i < len(seq):`, which excludes the index equal to len(seq).
+
+    `i <= len(seq)` must not qualify: it admits the out-of-range iteration.
+    """
+    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name):
+        return False
+    if test.left.id != index or len(test.ops) != 1 or not test.comparators:
+        return False
+    right = test.comparators[0]
+    if not (isinstance(right, ast.Call) and _dotted(right.func) == "len"):
+        return False
+    return isinstance(test.ops[0], ast.Lt)
+
+
+def _dominating_guard(loop: ast.For, index: str, reads: list[ast.Subscript]) -> ast.If | None:
+    """Return the bounds check that protects **every** read of `index`.
+
+    A guard must cover all reads, not just one of them, and a guard that lives inside
+    a nested loop cannot protect the outer loop's reads.
+    """
+    if not reads:
+        return None
+    nested = _nested_loop_node_ids(loop)
     read_lines = [_span(read)[0] for read in reads]
+
     for node in ast.walk(loop):
-        if not isinstance(node, ast.If) or not _name_checked(ast.unparse(node.test), index):
+        if not isinstance(node, ast.If) or id(node) in nested:
+            continue
+        if not _name_checked(ast.unparse(node.test), index):
             continue
         start, end = _span(node)
-        if _compare_against_length(node.test, index) and _exits_with(node, exits):
+
+        if _rejects_out_of_range(node.test, index, loop) and _body_always_exits(node.body):
+            # Reject-style guard: it must run before every read it protects.
             if all(end < line for line in read_lines):
                 return node
             continue
+
         if _guards_positive(node.test, index):
-            if any(start <= line <= end for line in read_lines):
+            # Positive guard: every protected read must sit inside its body.
+            if all(start <= line <= end for line in read_lines):
                 return node
     return None
 
 
-def _compare_against_length(test: ast.AST, index: str) -> bool:
-    """`i >= len(seq)`, `i > len(seq) - 1`, `i == len(seq)` all reject the bad index."""
-    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name) or test.left.id != index:
-        return False
-    right = test.comparators[0] if test.comparators else None
-    if right is None:
-        return False
-    target = right.left if isinstance(right, ast.BinOp) and isinstance(right.op, ast.Sub) else right
-    if not (isinstance(target, ast.Call) and _dotted(target.func) == "len"):
-        return False
-    return isinstance(test.ops[0], (ast.GtE, ast.Gt, ast.Eq))
+RAISES_HELPERS = {"raises", "assertRaises", "assertRaisesRegex", "raises"}
 
 
-def _guards_positive(test: ast.AST, index: str) -> bool:
-    """`if i < len(seq):` wraps a safe access."""
-    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name) or test.left.id != index:
-        return False
-    right = test.comparators[0] if test.comparators else None
-    if not (isinstance(right, ast.Call) and _dotted(right.func) == "len"):
-        return False
-    return isinstance(test.ops[0], (ast.Lt, ast.LtE))
-
-
-def _exits_with(node: ast.If, kinds: tuple[type, ...]) -> bool:
-    body = getattr(node, "body", None) or []
-    return any(isinstance(statement, kinds) for statement in body)
-
-
-RAISES_HELPERS = {"raises", "assertRaises", "assertRaisesRegex", "pytest.raises", "raises"}
+def _dotted_call_name(expr: ast.AST) -> str:
+    target = expr.func if isinstance(expr, ast.Call) else expr
+    return _dotted(target).split(".")[-1]
 
 
 def _is_raises_context(expr: ast.AST) -> bool:
-    # `with pytest.raises(...)` is a Call; `with self.assertRaises(...)` is also a Call.
-    target = expr.func if isinstance(expr, ast.Call) else expr
-    dotted = _dotted(target)
-    return dotted.split(".")[-1] in RAISES_HELPERS or dotted.endswith(("raises", "assertRaises"))
+    return _dotted_call_name(expr) in RAISES_HELPERS
 
 
-def _test_exercises_failure_path(test_source: str, name: str) -> bool:
-    """True when the test asserts an exception around a call to `name`."""
+def _asserted_exceptions(expr: ast.AST) -> list[str]:
+    """Exception names passed to a raises helper, e.g. `pytest.raises(ValueError)`."""
+    if not isinstance(expr, ast.Call) or not expr.args:
+        return []
+    first = expr.args[0]
+    names: list[str] = []
+    if isinstance(first, ast.Name):
+        names.append(first.id)
+    elif isinstance(first, ast.Attribute):
+        names.append(first.attr)
+    elif isinstance(first, ast.Tuple):
+        for element in first.elts:
+            if isinstance(element, ast.Name):
+                names.append(element.id)
+            elif isinstance(element, ast.Attribute):
+                names.append(element.attr)
+    return names
+
+
+def _raises_blocks_for(test_source: str, name: str) -> list[list[str]]:
+    """Exception names of every raises-block that wraps a call to `name`."""
     try:
         tree = ast.parse(test_source)
     except (SyntaxError, ValueError):
-        return False
+        return []
+    blocks: list[list[str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
-        if not any(_is_raises_context(item.context_expr) for item in node.items):
+        context = [item.context_expr for item in node.items if _is_raises_context(item.context_expr)]
+        if not context:
             continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call) and _dotted(sub.func).split(".")[-1] == name:
-                return True
-    return False
+        calls_it = any(
+            isinstance(sub, ast.Call) and _dotted_call_name(sub) == name for sub in ast.walk(node)
+        )
+        if calls_it:
+            blocks.append([exc for expr in context for exc in _asserted_exceptions(expr)])
+    return blocks
 
 
 def _test_calls_function(test_source: str, name: str) -> bool:
@@ -786,9 +895,23 @@ def _test_calls_function(test_source: str, name: str) -> bool:
     except (SyntaxError, ValueError):
         return False
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _dotted(node.func).split(".")[-1] == name:
+        if isinstance(node, ast.Call) and _dotted_call_name(node) == name:
             return True
     return False
+
+
+def _claim_names_failure(claim: str, exceptions: list[str]) -> bool:
+    """True when the finding's own wording names the asserted exception.
+
+    A `pytest.raises(ValueError)` block proves that *some* failure is tested. It only
+    refutes this finding when the finding is about that same failure, which is what
+    the exception name appearing in the claim establishes.
+    """
+    if not exceptions:
+        # `pytest.raises(...)` without a resolvable type, or `raises(match=...)`.
+        return False
+    lowered = claim.lower()
+    return any(name.lower() in lowered for name in exceptions)
 
 
 def _check_missing_test_coverage(
@@ -835,11 +958,29 @@ def _check_missing_test_coverage(
             "test files were retrieved but the reported line does not identify which function they should cover",
         )
 
-    failure = sorted(path for path, text in tests.items() if _test_exercises_failure_path(text, name))
-    if failure:
-        return ConditionVerdict(
-            CONTRADICTED, f"a retrieved test asserts an exception around {name}: {failure[0]}"
+    failure_blocks = {path: _raises_blocks_for(text, name) for path, text in tests.items()}
+    with_failure = {path: blocks for path, blocks in failure_blocks.items() if blocks}
+    if with_failure:
+        matching = sorted(
+            path
+            for path, blocks in with_failure.items()
+            if any(_claim_names_failure(context.claim_text, exceptions) for exceptions in blocks)
         )
+        if matching:
+            asserted = sorted(
+                {exc for blocks in with_failure.values() for exceptions in blocks for exc in exceptions}
+            )
+            return ConditionVerdict(
+                CONTRADICTED,
+                f"a retrieved test asserts {', '.join(asserted) or 'an exception'} around {name}, "
+                f"which is the failure this finding describes: {matching[0]}",
+            )
+        return ConditionVerdict(
+            UNKNOWN,
+            f"a retrieved test asserts an exception around {name}, but the finding does not name that "
+            "failure, so the specific claimed behaviour remains unverified",
+        )
+
     calling = sorted(path for path, text in tests.items() if _test_calls_function(text, name))
     if calling:
         return ConditionVerdict(
@@ -874,6 +1015,7 @@ def evaluate_condition(
     line: int | None,
     *,
     test_sources: dict[str, str] | None = None,
+    claim_text: str = "",
 ) -> ConditionVerdict:
     """Run the deterministic condition check for one finding."""
     check = CHECKS.get(issue_type)
@@ -896,6 +1038,7 @@ def evaluate_condition(
         line=line,
         test_sources=test_sources or {},
         function_name=getattr(function, "name", None) if function is not None else None,
+        claim_text=claim_text,
     )
     if scope is None:
         return ConditionVerdict(UNKNOWN, "no analyzable scope for the reported line")

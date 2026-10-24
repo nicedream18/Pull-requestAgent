@@ -21,6 +21,10 @@ actually run in this workspace. Nothing is projected.
 | AST scope | checks walked the whole file, so a defect at line 2 proved a finding at line 5 in a different function | checks walk only the resolved block: the enclosing function, or module-level statements |
 | AST call site | inside one function, a check judged the *first* matching call, so a safe call at line 3 refuted a finding on the risky call at line 5 | candidates are tied to the reported line; if none is, the answer is `UNKNOWN` instead of borrowing another call site |
 | Bounds guard | any length comparison anywhere in the loop counted as a guard, including one placed after the read | the guard must dominate every read: reject-style guards must precede them, positive guards must contain them |
+| Guard shape | `i <= len(x)` counted as a positive guard and `i > len(x)` as a reject guard; both admit the out-of-range iteration | only `i < len(x)` guards positively; only `i >= len(x)`, `i > len(x) - 1` and `i == len(x)` (the last only for `range(len(x) + 1)`) reject |
+| Guard coverage | a guard covering one of two reads was accepted for both | every analysed read must be protected; the check uses `all`, not `any` |
+| Guard exit | a `break` anywhere in the guard body was treated as exiting, including one belonging to a nested loop, and a conditional break counted too | exit is proven only by an unconditional `return`/`raise`/`break`/`continue` on all branches, and guards inside nested loops are ignored |
+| Test coverage and `pytest.raises` | a raises-block around the function was enough to refute any test-gap claim | refuted only when the asserted exception is named in the finding's own claim; otherwise `UNKNOWN` |
 | Boundary check | `range(len(x) + 1)` anywhere in the file was `SUPPORTED` | requires the loop index to actually be used to subscript, and no in-loop bounds guard |
 | Verifier mutation | `verify_findings` wrote `evidence_level`, `verification_status` and `trigger_condition` onto the caller's objects | it verifies a deep copy; the flow also freezes `state.raw_findings` before verification |
 | Matching | file + category + line window + token overlap; a finding without `start_line` could match | defect only, same file, concrete line within ±2, evidence present verbatim in the changed file, then `issue_type` equality or a documented text fallback |
@@ -116,7 +120,27 @@ isolate a real effect, because they share the same prompt and differ only in the
 `condition_checks` flag. B/A comparisons mix a prompt change with a measurement
 change and must be labeled as such.
 
-## 4. The single offline false negative
+## 4. Guard soundness, before and after
+
+Every row below was reproduced as a wrong `CONTRADICTED` — that is, a real defect being
+rejected — before it was fixed. The right column is the current answer.
+
+| Minimal case | Before | After |
+| --- | --- | --- |
+| `for i in range(len(x)+1):` + `if i <= len(x): print(x[i])` | contradicted | **supported** |
+| `if i > len(x): break` then `print(x[i])` | contradicted | **supported** |
+| `if i < len(x): print(x[i])` then a second unguarded `print(x[i])` | contradicted | **supported** |
+| `break` inside a nested `while` used as the guard | contradicted | **supported** |
+| `if i >= len(x): if strict: break` | contradicted | **supported** |
+| `if i >= len(x): break` before the read | contradicted | contradicted |
+| `if i < len(x): print(x[i])` | contradicted | contradicted |
+| `if i > len(x) - 1: break`, `if i == len(x): break` | contradicted | contradicted |
+
+Test coverage follows the same principle: a `pytest.raises` block proves that *some*
+failure is tested, not the failure the finding describes. `test-gap-07` therefore stays
+`UNKNOWN` in every offline run.
+
+## 5. The single offline false negative
 
 `dynamic` recall is 0.900 rather than 1.000, and exactly one labelled defect is
 unconfirmed: `test-gap-07` (`missing_test_coverage`).
@@ -141,7 +165,7 @@ a `pytest.raises` around the function refutes the gap, a happy-path call or a ba
 mention does not. The expected effect of that retrieval work is one labelled defect
 moving from advisory back to confirmed, not a change to the metric.
 
-## 5. Offline baseline after all changes
+## 6. Offline baseline after all changes
 
 Command:
 
@@ -168,7 +192,7 @@ still reported, as an advisory flagged for human review, and `advisory_rate` sho
 the trade explicitly. The CI assertion was updated to permit exactly this one miss
 and to fail on any other change.
 
-## 6. Verifier contribution, measured without an LLM
+## 7. Verifier contribution, measured without an LLM
 
 The layer-1/layer-2 split is covered by tests rather than by the replay, because the
 recording has already been through a verifier. `tests/test_false_positive_controls.py`
@@ -183,7 +207,7 @@ fixture:
 That is a real, reproducible measurement of layer 2, but it is one synthetic claim.
 It shows the mechanism works; it does not quantify the FP reduction on live output.
 
-## 7. Cost
+## 8. Cost
 
 Measured from the recorded v1 run:
 
@@ -207,7 +231,7 @@ cost              : estimated USD 0.0285 per run at the configured price
 
 The price is a configured parameter, not an invoice. No billed amount is claimed.
 
-## 8. Why the offline mode cannot substitute for B and C
+## 9. Why the offline mode cannot substitute for B and C
 
 `--mode offline` replaces the agents with `OfflineFixtureRunner`, a deterministic regex
 runner that ignores the prompt. Its output therefore says nothing about prompt v2, and
@@ -219,7 +243,7 @@ model pass and freezes the output before any verification, then replays the same
 findings through both verifier configurations. No second model call, so no model
 nondeterminism can enter the B/C comparison.
 
-## 9. Limitations
+## 10. Limitations
 
 1. **15 fixtures.** Each labelled case holds exactly one defect. A correct but
    unlabelled observation is still charged as a false positive, which caps the
@@ -245,10 +269,11 @@ nondeterminism can enter the B/C comparison.
    - `NullType` guards written as `if not isinstance(user, X)` (a false positive, not a
      false rejection)
    - shell invocation through a wrapper the checker does not recognise
+   - guard helpers imported from elsewhere rather than written inline
    A wrong `SUPPORTED` shows up as a false positive; a wrong `CONTRADICTED` would
    remove a real defect, so the checks are written to prefer `UNKNOWN`.
 
-## 10. The B/C harness
+## 11. The B/C harness
 
 `evals/ablation.py` implements the shared-input requirement:
 
@@ -278,7 +303,7 @@ about layer 2's effect on real model output. `test_ablation_replays_the_same_raw
 covers the mechanism with a synthetic false SQL claim: B keeps it (`fp=1`), C rejects
 it (`condition_not_met`, `fp=0`), and the shared input is byte-identical afterwards.
 
-## 11. Is a critic worth adding?
+## 12. Is a critic worth adding?
 
 Not yet, and the current data argues against it:
 
@@ -295,7 +320,22 @@ Not yet, and the current data argues against it:
 Recommendation: run B and C, and only consider a critic if C's advisory rate is high
 while its defect recall is already acceptable.
 
-## 12. Next command, pending budget approval
+## 13. Paid-run safety
+
+Verified before any spend:
+
+| Control | Value | Where |
+| --- | --- | --- |
+| Model calls | one pass, ~41 calls | `evals/ablation.py` |
+| Per-PR agent cap | 6 | `PRReviewRequest.max_agent_calls` |
+| Concurrency | 3 | `PRReviewRequest.concurrency` |
+| Per-agent timeout | 90 s | `PRReviewRequest.timeout_seconds` |
+| Retries per agent | 1 | `run_agent` |
+| Case failure | recorded in `failed_cases`, pass continues, artifact still written, exit code 1 | `_run_once` |
+| Duplicate spend | impossible by design: both rungs replay the same frozen findings | `_replay_verifier` |
+| Artifacts | `ablation.json` with raw findings, per-rung verified findings, rejection reasons, tokens, calls, latency | `output_dir` |
+
+## 14. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens

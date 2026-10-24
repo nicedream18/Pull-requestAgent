@@ -43,9 +43,16 @@ def _load_cases(path: Path) -> tuple[dict, list[dict]]:
     return dataset, dataset["cases"]
 
 
-def _run_once(cases: list[dict], mode: str, model: str | None, output_dir: Path) -> list[FlowState]:
-    """One strategy pass, keeping the frozen pre-verifier snapshot of each case."""
+def _run_once(
+    cases: list[dict], mode: str, model: str | None, output_dir: Path
+) -> tuple[list[FlowState], list[dict]]:
+    """One strategy pass, keeping the frozen pre-verifier snapshot of each case.
+
+    A case that raises is recorded and the pass continues. Paid model output from the
+    cases that already ran is never discarded because a later case failed.
+    """
     states: list[FlowState] = []
+    failures: list[dict] = []
     for case in cases:
         snapshot, sources = snapshot_for(case)
         runner = OfflineFixtureRunner(sources) if mode == "offline" else None
@@ -63,9 +70,19 @@ def _run_once(cases: list[dict], mode: str, model: str | None, output_dir: Path)
             condition_checks=True,
         )
         flow = ReviewFlow(github_client=FixtureClient(snapshot, sources), agent_runner=runner)
-        flow.kickoff(inputs={"request": request.model_dump()})
+        try:
+            flow.kickoff(inputs={"request": request.model_dump()})
+        except Exception as exc:
+            failures.append({
+                "case_id": case["case_id"],
+                "error_type": type(exc).__name__,
+                "error": str(exc).replace("\n", " ")[:240],
+            })
+            print(f"[{case['case_id']}] case failed: {type(exc).__name__}")
+            states.append(flow.state)
+            continue
         states.append(flow.state)
-    return states
+    return states, failures
 
 
 def _replay_verifier(cases: list[dict], states: list[FlowState], *, check_conditions: bool) -> tuple[dict, dict]:
@@ -179,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"running one {args.mode} pass over {len(cases)} cases")
-    states = _run_once(cases, args.mode, args.model, output_dir)
+    states, failures = _run_once(cases, args.mode, args.model, output_dir)
 
     raw_scores = _raw_row(cases, states)
     b_scores, b_rejections = _replay_verifier(cases, states, check_conditions=False)
@@ -198,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         "prompt_version": PROMPT_VERSION,
         "dataset_version": dataset.get("dataset_version", "unknown"),
         "case_count": len(cases),
+        "failed_cases": failures,
         "mode": args.mode,
         "model": args.model or os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-chat",
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -234,6 +252,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{row['verifier_rejections']:>5}{row['advisory_count']:>5}"
         )
     print(f"\nwrote {destination}")
+    if failures:
+        print(f"{len(failures)} case(s) failed and are recorded in failed_cases")
+        return 1
     return 0
 
 

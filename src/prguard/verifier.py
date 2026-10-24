@@ -222,6 +222,9 @@ def verify_findings(
                 source_map.get(finding.file_path, ""),
                 finding.start_line,
                 test_sources=_test_sources_for(finding.file_path, source_map),
+                # The finding's own wording decides whether a retrieved failure-path
+                # test covers the claimed failure, not just that some test raises.
+                claim_text=f"{finding.title} {finding.description} {finding.trigger_condition}",
             )
             if verdict.status == CONTRADICTED:
                 rejected.append(
