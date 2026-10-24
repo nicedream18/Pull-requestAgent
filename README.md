@@ -99,6 +99,23 @@ Layer 2 uses syntax trees, and only uses text matching to *refute* a claim. A fi
 
 **Evaluation accounting.** Advisories no longer enter defect precision, but the evaluator also reports `strict_precision` where advisories count as false positives, plus `advisory_rate`, `verifier_rejection_rate`, per-agent rejection rates, and verifier before/after counts. Labelling everything as advice therefore cannot raise the headline number.
 
+## Verifier ablation harness
+
+`evals/ablation.py` compares verifier configurations without paying for a second model
+pass: one run, frozen raw findings, then both rungs applied to that same list.
+
+```bash
+# plan and cost, no tokens
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online --dry-run
+
+# one pass, both rungs, one report with raw + verified findings per case
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
+  --model deepseek/deepseek-chat --output artifacts/evals/ablation
+```
+
+`--mode offline` exercises the harness with the deterministic runner; it validates the
+plumbing only and says nothing about prompt quality.
+
 ## Measured results
 
 | Record | Scope | Result |

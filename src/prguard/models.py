@@ -229,6 +229,9 @@ class FlowState(BaseModel):
     risk_level: RiskLevel = RiskLevel.LOW
     selected_agents: list[str] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    # Immutable snapshot of agent output taken immediately before verification, so
+    # pre-verifier and post-verifier scores are computed from the same raw findings.
+    raw_findings: list[Finding] = Field(default_factory=list)
     verified_findings: list[Finding] = Field(default_factory=list)
     token_usage: dict[str, int] = Field(default_factory=lambda: {"input": 0, "output": 0, "total": 0, "calls": 0})
     execution_time: float = 0

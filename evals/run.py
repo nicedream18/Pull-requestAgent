@@ -82,7 +82,7 @@ def _run_strategy(
         case_results.append({
             "case_id": case["case_id"],
             "findings": findings,
-            "raw_findings": [finding.model_dump(mode="json") for finding in state.findings],
+            "raw_findings": [finding.model_dump(mode="json") for finding in state.raw_findings],
             "rejected": rejected,
             "run_metrics": {
                 "execution_seconds": state.execution_time,
@@ -96,7 +96,7 @@ def _run_strategy(
                 "full_context_tokens": state.metrics.get("full_context_tokens", 0),
                 "optimized_context_tokens": state.metrics.get("input_tokens", 0),
                 "context_tokens_saved": state.metrics.get("context_tokens_saved", 0),
-                "raw_finding_count": len(state.findings),
+                "raw_finding_count": len(state.raw_findings),
             },
         })
         per_case_runs.append({
@@ -104,7 +104,7 @@ def _run_strategy(
             "status": state.review_status,
             "selected_agents": state.selected_agents,
             "findings": [finding.model_dump(mode="json") for finding in findings],
-            "raw_findings": [finding.model_dump(mode="json") for finding in state.findings],
+            "raw_findings": [finding.model_dump(mode="json") for finding in state.raw_findings],
             "rejected": rejected,
             "errors": state.errors,
             **case_results[-1]["run_metrics"],

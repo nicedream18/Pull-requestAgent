@@ -84,7 +84,11 @@ class ConditionContext:
     """Extra facts the verifier can supply beyond the single file's source."""
 
     line: int | None = None
-    test_paths_for_module: set[str] | None = None
+    # Test files retrieved for this module, with their contents. Presence alone is
+    # not proof that a specific behaviour path is covered, so the contents matter.
+    test_sources: dict[str, str] | None = None
+    # Name of the function that encloses the reported line, when resolvable.
+    function_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,50 @@ class ConditionVerdict:
     status: str
     reason: str
     line: int | None = None
+
+
+def _resolve_scope(tree: ast.AST, line: int | None) -> tuple[ast.AST | None, bool, ast.AST | None]:
+    """Return ``(function, resolved, scope_root)`` for a reported line.
+
+    ``function`` is the enclosing function when the line sits inside one.
+    ``scope_root`` is what a check must walk: the function's body, or the module-level
+    statements when the finding is about top-level code.
+
+    ``resolved`` is False when the line cannot be tied to a single block, which
+    happens when the file has several top-level definitions and the finding gives no
+    usable line. Checks must treat that as UNKNOWN rather than scanning the whole
+    file and borrowing a defect from an unrelated location.
+    """
+    functions = _function_nodes(tree)
+    if line is not None:
+        function = _enclosing_function(tree, line)
+        if function is not None:
+            return function, True, function
+        return None, True, _module_scope(tree)
+    if len(functions) == 1:
+        return functions[0], True, functions[0]
+    if not functions:
+        return None, True, _module_scope(tree)
+    return None, False, None
+
+
+class _ModuleScope(ast.AST):
+    """A synthetic node holding only module-level statements, not nested definitions."""
+
+    _fields: tuple[str, ...] = ("body",)
+
+    def __init__(self, body: list[ast.AST]) -> None:
+        self.body = body
+        self.lineno = 1
+
+
+def _module_scope(tree: ast.AST) -> ast.AST:
+    body = [
+        node
+        for node in getattr(tree, "body", [])
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    return _ModuleScope(body)
 
 
 def _dotted(node: ast.AST) -> str:
@@ -216,11 +264,12 @@ def _calls(tree: ast.AST, names: set[str]) -> list[ast.Call]:
 
 
 def _check_sql_injection(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
+    scope = scope or tree
     calls = [
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(scope)
         if isinstance(node, ast.Call)
         and (
             (isinstance(node.func, ast.Attribute) and node.func.attr in SQL_EXECUTORS)
@@ -230,7 +279,7 @@ def _check_sql_injection(
     if not calls:
         if DB_HINTS.search(source):
             return ConditionVerdict(UNKNOWN, "database usage is present but no SQL execution call is recognised")
-        return ConditionVerdict(CONTRADICTED, "the file contains no database call, so it cannot inject SQL")
+        return ConditionVerdict(CONTRADICTED, "the reported block contains no database call, so it cannot inject SQL")
 
     for call in calls:
         if not call.args:
@@ -255,9 +304,10 @@ def _check_sql_injection(
 
 
 def _check_unsafe_command(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    for node in ast.walk(tree):
+    scope = scope or tree
+    for node in ast.walk(scope):
         if not isinstance(node, ast.Call):
             continue
         dotted = _dotted(node.func)
@@ -271,15 +321,16 @@ def _check_unsafe_command(
                 return ConditionVerdict(SUPPORTED, "subprocess is invoked with shell=True", node.lineno)
             if dotted == "asyncio.create_subprocess_shell":
                 return ConditionVerdict(SUPPORTED, "create_subprocess_shell always uses a shell", node.lineno)
-    if _calls(tree, SUBPROCESS_CALLS):
-        return ConditionVerdict(CONTRADICTED, "every subprocess call runs without shell=True")
-    return ConditionVerdict(UNKNOWN, "no recognised shell or subprocess invocation in the changed file")
+    if _calls(scope, SUBPROCESS_CALLS):
+        return ConditionVerdict(CONTRADICTED, "every subprocess call in this block runs without shell=True")
+    return ConditionVerdict(UNKNOWN, "no recognised shell or subprocess invocation in the reported block")
 
 
 def _check_file_mode(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    for node in ast.walk(tree):
+    scope = scope or tree
+    for node in ast.walk(scope):
         if not isinstance(node, ast.Call):
             continue
         if _dotted(node.func) not in {"os.chmod", "chmod", "os.fchmod", "pathlib.Path.chmod"} and not (
@@ -297,14 +348,15 @@ def _check_file_mode(
         if mode & 0o002:
             return ConditionVerdict(SUPPORTED, f"mode {oct(mode)} grants write access to other users", node.lineno)
         return ConditionVerdict(CONTRADICTED, f"mode {oct(mode)} does not grant other-user write", node.lineno)
-    return ConditionVerdict(UNKNOWN, "no chmod call in the changed file")
+    return ConditionVerdict(UNKNOWN, "no chmod call in the reported block")
 
 
 def _check_hardcoded_secret(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
     loaded_from_environment = False
-    for node in ast.walk(tree):
+    scope = scope or tree
+    for node in ast.walk(scope):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -326,14 +378,15 @@ def _check_hardcoded_secret(
         return ConditionVerdict(UNKNOWN, f"{names[0]} is assigned a value that is not a literal", node.lineno)
     if loaded_from_environment:
         return ConditionVerdict(CONTRADICTED, "the secret-named value is read from the environment")
-    return ConditionVerdict(UNKNOWN, "no credential-named assignment in the changed file")
+    return ConditionVerdict(UNKNOWN, "no credential-named assignment in the reported scope")
 
 
 def _check_division_by_zero(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    scope = function or tree
-    params = _params(scope) if function is not None else set()
+    scope = scope or tree
+    function = scope if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    params = _params(function) if function is not None else set()
     for node in ast.walk(scope):
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
             continue
@@ -350,7 +403,7 @@ def _check_division_by_zero(
         if _zero_guarded(scope, name, node.lineno):
             return ConditionVerdict(CONTRADICTED, f"divisor '{name}' is guarded before the division", node.lineno)
         return ConditionVerdict(SUPPORTED, f"divisor '{name}' is a parameter with no zero guard", node.lineno)
-    return ConditionVerdict(UNKNOWN, "no division found in the changed function")
+    return ConditionVerdict(UNKNOWN, "no division found in the reported block")
 
 
 def _zero_guarded(scope: ast.AST, name: str, use_line: int) -> bool:
@@ -378,16 +431,16 @@ def _zero_guarded(scope: ast.AST, name: str, use_line: int) -> bool:
 
 
 def _check_resource_leak(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    scope = function or tree
+    scope = scope or tree
     opens = [
         node
         for node in ast.walk(scope)
         if isinstance(node, ast.Call) and _dotted(node.func) in {"open", "io.open", "codecs.open"}
     ]
     if not opens:
-        return ConditionVerdict(UNKNOWN, "no open() call in the changed function")
+        return ConditionVerdict(UNKNOWN, "no open() call in the reported block")
     closed = any(
         isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "close"
         for node in ast.walk(scope)
@@ -398,19 +451,19 @@ def _check_resource_leak(
         if closed:
             return ConditionVerdict(UNKNOWN, "handle is closed explicitly somewhere, so coverage is path dependent", node.lineno)
         return ConditionVerdict(SUPPORTED, "handle opened outside a with-block and never closed", node.lineno)
-    return ConditionVerdict(CONTRADICTED, "every open() call is inside a with-block")
+    return ConditionVerdict(CONTRADICTED, "every open() call in this block is inside a with-block")
 
 
 def _check_missing_exception_handling(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    scope = function or tree
+    scope = scope or tree
     calls = [node for node in ast.walk(scope) if isinstance(node, ast.Call) and _dotted(node.func) in RAISING_CALLS]
     if not calls:
-        return ConditionVerdict(UNKNOWN, "no exception-raising call in the changed function")
+        return ConditionVerdict(UNKNOWN, "no exception-raising call in the reported block")
     unguarded = [node for node in calls if not _inside(node, scope, (ast.Try,))]
     if not unguarded:
-        return ConditionVerdict(CONTRADICTED, "every raising call is inside a try block")
+        return ConditionVerdict(CONTRADICTED, "every raising call in this block is inside a try block")
     return ConditionVerdict(
         SUPPORTED,
         f"{len(unguarded)} raising call(s) such as {_dotted(unguarded[0].func)} escape without a handler",
@@ -419,10 +472,11 @@ def _check_missing_exception_handling(
 
 
 def _check_null_dereference(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
+    function = scope if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
     if function is None:
-        return ConditionVerdict(UNKNOWN, "no enclosing function for the reported line")
+        return ConditionVerdict(CONTRADICTED, "module-level code has no parameter that could be Optional")
     optional = _optional_params(function)
     if not optional:
         return ConditionVerdict(CONTRADICTED, "the function has no Optional-typed parameter")
@@ -443,14 +497,19 @@ def _check_null_dereference(
 
 
 def _check_boundary(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    scope = function or tree
+    """Confirm an off-by-one only when the extra iteration actually indexes out of range."""
+    scope = scope or tree
+
     for node in ast.walk(scope):
-        if not isinstance(node, ast.Call) or _dotted(node.func) != "range" or not node.args:
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
             continue
-        arg = node.args[0]
-        if (
+        iterable = node.iter
+        if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
+            continue
+        arg = iterable.args[0]
+        if not (
             isinstance(arg, ast.BinOp)
             and isinstance(arg.op, ast.Add)
             and isinstance(arg.right, ast.Constant)
@@ -458,7 +517,29 @@ def _check_boundary(
             and isinstance(arg.left, ast.Call)
             and _dotted(arg.left.func) == "len"
         ):
-            return ConditionVerdict(SUPPORTED, "range(len(seq) + 1) indexes one past the end", node.lineno)
+            continue
+        index = node.target.id
+        # The extra iteration is only a defect if the body reads through the index.
+        reads = [
+            sub
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Name) and sub.slice.id == index
+        ]
+        if not reads:
+            return ConditionVerdict(
+                CONTRADICTED,
+                f"range(len(...) + 1) iterates once more but {index} is never used to index, so it cannot raise",
+                node.lineno,
+            )
+        if _loop_guards_index(node, index):
+            return ConditionVerdict(
+                CONTRADICTED, f"{index} is bounds-checked inside the loop before it is used", reads[0].lineno
+            )
+        return ConditionVerdict(
+            SUPPORTED,
+            f"range(len(...) + 1) with {index} used as an index reads one past the end",
+            node.lineno,
+        )
 
     for node in ast.walk(scope):
         if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
@@ -467,6 +548,7 @@ def _check_boundary(
         if right is None:
             continue
         op = node.ops[0]
+        name = node.left.id
         if isinstance(right, ast.Call) and _dotted(right.func) == "len":
             if isinstance(op, ast.LtE):
                 return ConditionVerdict(
@@ -488,44 +570,90 @@ def _check_boundary(
             return ConditionVerdict(
                 CONTRADICTED, f"bound subtracts one from len(), so it stays in range: {ast.unparse(node)}", node.lineno
             )
+        del name
 
     for node in ast.walk(scope):
-        if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-            iterable = node.iter
-            if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
-                continue
-            arg = iterable.args[0]
-            if not (isinstance(arg, ast.Call) and _dotted(arg.func) == "len"):
-                continue
-            subscripts = [sub for sub in ast.walk(node) if isinstance(sub, ast.Subscript)]
-            if subscripts and all(
-                isinstance(sub.slice, ast.Name) and sub.slice.id == node.target.id for sub in subscripts
-            ):
-                return ConditionVerdict(
-                    CONTRADICTED,
-                    f"for {node.target.id} in range(len(...)) indexes exactly the valid range",
-                    node.lineno,
-                )
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+            continue
+        iterable = node.iter
+        if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
+            continue
+        arg = iterable.args[0]
+        if not (isinstance(arg, ast.Call) and _dotted(arg.func) == "len"):
+            continue
+        subscripts = [sub for sub in ast.walk(node) if isinstance(sub, ast.Subscript)]
+        if subscripts and all(
+            isinstance(sub.slice, ast.Name) and sub.slice.id == node.target.id for sub in subscripts
+        ):
+            return ConditionVerdict(
+                CONTRADICTED,
+                f"for {node.target.id} in range(len(...)) indexes exactly the valid range",
+                node.lineno,
+            )
 
     if any(isinstance(node, ast.Subscript) for node in ast.walk(scope)):
         return ConditionVerdict(UNKNOWN, "indexing is present but the bound relation is not statically decidable")
-    return ConditionVerdict(UNKNOWN, "the changed function has no loop bound to inspect")
+    return ConditionVerdict(UNKNOWN, "the reported block has no loop bound to inspect")
+
+
+def _loop_guards_index(loop: ast.For, index: str) -> bool:
+    """True when the loop body bounds-checks `index` before reading through it."""
+    exits = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    for node in ast.walk(loop):
+        if not isinstance(node, ast.If) or not _name_checked(ast.unparse(node.test), index):
+            continue
+        if _compare_against_length(node.test, index) and _exits_with(node, exits):
+            # `if i >= len(seq): break` skips the out-of-range iteration.
+            return True
+        bodies = [sub for sub in ast.walk(node) if isinstance(sub, ast.Subscript)]
+        if bodies and isinstance(node.test, ast.Compare) and _guards_positive(node.test, index):
+            return True
+    return False
+
+
+def _compare_against_length(test: ast.AST, index: str) -> bool:
+    """`i >= len(seq)`, `i > len(seq) - 1`, `i == len(seq)` all reject the bad index."""
+    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name) or test.left.id != index:
+        return False
+    right = test.comparators[0] if test.comparators else None
+    if right is None:
+        return False
+    target = right.left if isinstance(right, ast.BinOp) and isinstance(right.op, ast.Sub) else right
+    if not (isinstance(target, ast.Call) and _dotted(target.func) == "len"):
+        return False
+    return isinstance(test.ops[0], (ast.GtE, ast.Gt, ast.Eq))
+
+
+def _guards_positive(test: ast.Compare, index: str) -> bool:
+    """`if i < len(seq):` wraps a safe access."""
+    if not isinstance(test.left, ast.Name) or test.left.id != index:
+        return False
+    right = test.comparators[0] if test.comparators else None
+    if not (isinstance(right, ast.Call) and _dotted(right.func) == "len"):
+        return False
+    return isinstance(test.ops[0], (ast.Lt, ast.LtE))
+
+
+def _exits_with(node: ast.If, kinds: tuple[type, ...]) -> bool:
+    body = getattr(node, "body", None) or []
+    return any(isinstance(statement, kinds) for statement in body)
 
 
 def _check_missing_test_coverage(
-    tree: ast.AST, function: ast.AST | None, source: str, context: "ConditionContext"
+    tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    """A diff alone cannot prove that no test exists.
+    """A diff cannot prove that no test exists, and a test file does not prove coverage.
 
-    Only two outcomes are provable: tests for the module are supplied (refuted), or
-    the code has no risky behaviour at all (nothing worth testing, so not a defect).
-    Anything else is UNKNOWN and the finding is downgraded for human review.
+    Outcomes:
+
+    * a test file for this module references the changed function -> CONTRADICTED
+    * a test file for this module exists but does not reference it -> UNKNOWN, because
+      the retrieved test content may be partial or may cover the function indirectly
+    * no test file in the retrieved context -> UNKNOWN for risky code, since absence
+      from a bounded retrieval window is not proof of absence
+    * the changed code has no risky behaviour -> CONTRADICTED, it is not a defect
     """
-    if context.test_paths_for_module:
-        return ConditionVerdict(
-            CONTRADICTED, f"tests exist for this module: {', '.join(sorted(context.test_paths_for_module)[:3])}"
-        )
-    scope = function or tree
+    scope = scope or tree
     mutations = {
         node.func.attr
         for node in ast.walk(scope)
@@ -541,9 +669,29 @@ def _check_missing_test_coverage(
             CONTRADICTED,
             "the changed code has no multi-resource mutation or side effect, so a test gap is advice, not a defect",
         )
+
+    tests = context.test_sources or {}
+    if not tests:
+        return ConditionVerdict(
+            UNKNOWN,
+            "the changed code is risky but no test file was retrieved, and a bounded context cannot prove absence",
+        )
+
+    name = context.function_name
+    if name:
+        referencing = sorted(path for path, text in tests.items() if re.search(rf"\b{re.escape(name)}\b", text or ""))
+        if referencing:
+            return ConditionVerdict(
+                CONTRADICTED, f"a retrieved test file references {name}: {referencing[0]}"
+            )
+        return ConditionVerdict(
+            UNKNOWN,
+            f"test files were retrieved ({', '.join(sorted(tests)[:2])}) but none references {name}, "
+            "and indirect coverage cannot be ruled out from the supplied text",
+        )
     return ConditionVerdict(
         UNKNOWN,
-        "the changed code is risky but the supplied context does not enumerate the test suite, so absence is unprovable",
+        "test files were retrieved but the reported line does not identify which function they should cover",
     )
 
 
@@ -566,7 +714,7 @@ def evaluate_condition(
     source: str,
     line: int | None,
     *,
-    test_paths_for_module: set[str] | None = None,
+    test_sources: dict[str, str] | None = None,
 ) -> ConditionVerdict:
     """Run the deterministic condition check for one finding."""
     check = CHECKS.get(issue_type)
@@ -579,10 +727,18 @@ def evaluate_condition(
     except (SyntaxError, ValueError):
         return ConditionVerdict(UNKNOWN, "file could not be parsed for condition checking")
 
-    function = _enclosing_function(tree, line) if line else None
-    if function is None:
-        functions = _function_nodes(tree)
-        function = functions[0] if len(functions) == 1 else None
-    context = ConditionContext(line=line, test_paths_for_module=test_paths_for_module or set())
-    return check(tree, function, source, context)
+    function, resolved, scope = _resolve_scope(tree, line)
+    if not resolved:
+        return ConditionVerdict(
+            UNKNOWN,
+            "the reported location does not identify a single function, so no in-file evidence can be tied to it",
+        )
+    context = ConditionContext(
+        line=line,
+        test_sources=test_sources or {},
+        function_name=getattr(function, "name", None) if function is not None else None,
+    )
+    if scope is None:
+        return ConditionVerdict(UNKNOWN, "no analyzable scope for the reported line")
+    return check(tree, scope, source, context)
 

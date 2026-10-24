@@ -277,8 +277,13 @@ class ReviewFlow(Flow[FlowState]):
         started = time.monotonic()
         if self.snapshot is None or self.request is None:
             return {"run_id": self.state.run_id, "status": "failed"}
+        # Freeze the agent output before verification. The verifier works on copies,
+        # but an explicit snapshot also guards against any future in-place edit and
+        # gives pre-verifier scoring a source that cannot drift.
+        raw_findings = [item.model_copy(deep=True) for item in self.state.findings]
+        self.state.raw_findings = raw_findings
         verified, rejected = verify_findings(
-            self.state.findings,
+            raw_findings,
             self.snapshot,
             self.source_map,
             self.related_paths,

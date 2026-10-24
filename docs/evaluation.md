@@ -81,6 +81,20 @@ Each run also records `raw_finding_count` (before verification),
 rejected output was noise or lost recall. `mean_findings_per_pr` and
 `false_positives_per_no_defect_pr` describe output volume.
 
+## Verifier isolation
+
+Pre-verifier and post-verifier scores must describe the same input, so the pipeline
+freezes the agent output first:
+
+1. `FlowState.raw_findings` is a deep copy taken immediately before verification.
+2. `verify_findings` itself works on deep copies and never writes to its arguments.
+3. `evals.metrics._pre_verifier_scores` scores `raw_findings`; the post-verifier scores
+   use `verified_findings`; both go through the same matcher and the same ground truth.
+
+`evals/ablation.py` builds on this to compare verifier configurations without a second
+model call: one pass, frozen findings, then `check_conditions=False` and `True` applied
+to the same list.
+
 ## Re-scoring a recorded run
 
 `evals.replay_v1` re-scores an archived `results.json` without calling a model:

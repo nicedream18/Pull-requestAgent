@@ -21,6 +21,8 @@ jobs:
         run: PYTHONPATH=src uv run pytest tests -q
       - name: Offline benchmark
         run: PYTHONPATH=src uv run python -m evals.run --mode offline --output artifacts/ci
+      - name: Offline ablation harness
+        run: PYTHONPATH=src uv run python -m evals.ablation --mode offline --output artifacts/ci-ablation
       - name: Assert the offline baseline did not regress
         run: |
           python - <<'PY'

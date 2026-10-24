@@ -6,6 +6,9 @@ actually run in this workspace. Nothing is projected.
 
 - Branch: `feat/false-positive-reduction`
 - Evaluator: `prguard-eval-v2`
+- **Rungs B and C are still unmeasured.** `evals.ablation` is the harness that will
+  produce them from a single model pass; it has only been run with the deterministic
+  offline runner.
 - Dataset: `evals/datasets/prguard_v1.json` v1.0, 15 fixtures (10 labelled defects, 5 clean)
 - Recorded baseline: `artifacts/evals/online/20261024T081509Z/results.json`
   (prompt `prguard-review-v1`, `deepseek/deepseek-chat`, run on 2026-10-24)
@@ -14,6 +17,10 @@ actually run in this workspace. Nothing is projected.
 
 | Area | Before | After |
 | --- | --- | --- |
+| Test-coverage check | any `test_*.py` in context refuted every module's test-gap claim; a module-specific test file refuted it even when the test never touched the function | the test file must be named for this module **and** contain the function name; otherwise `UNKNOWN` |
+| AST scope | checks walked the whole file, so a defect at line 2 proved a finding at line 5 in a different function | checks walk only the resolved block: the enclosing function, or module-level statements |
+| Boundary check | `range(len(x) + 1)` anywhere in the file was `SUPPORTED` | requires the loop index to actually be used to subscript, and no in-loop bounds guard |
+| Verifier mutation | `verify_findings` wrote `evidence_level`, `verification_status` and `trigger_condition` onto the caller's objects | it verifies a deep copy; the flow also freezes `state.raw_findings` before verification |
 | Matching | file + category + line window + token overlap; a finding without `start_line` could match | defect only, same file, concrete line within ±2, evidence present verbatim in the changed file, then `issue_type` equality or a documented text fallback |
 | `strict_precision` | advices were concatenated with defects, so an advisory with the right `issue_type` could be a TP | only a `defect` can be a TP; every advisory is a FP in `strict_*` |
 | Legacy metrics | the published scorer was edited in place | frozen as `_legacy_score`; four separate metric views are reported |
@@ -93,8 +100,8 @@ penalised by the unified matcher largely because it cannot express what it found
 | A0 | v1 output, legacy matcher | measured (recorded file) | 0.093 | 0.700 | 0.165 |
 | A1 | v1 output, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
 | A2 | v1 output through the v2 verifier, unified matcher | measured (replay) | 0.013 | 0.100 | 0.024 |
-| B | v2 prompt, layer 1 only (`--condition-checks off`) | **not run** | — | — | — |
-| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **not run** | — | — | — |
+| B | v2 prompt, layer 1 only (`--condition-checks off`) | **not run**; harness ready (`evals.ablation`) | — | — | — |
+| C | v2 prompt, layer 1 + 2 (`--condition-checks on`) | **not run**; harness ready (`evals.ablation`) | — | — | — |
 | D | C + conditional critic | not implemented | — | — | — |
 
 A2 is identical to A1 because `require_trigger=False` is passed during replay: prompt
@@ -173,20 +180,17 @@ cost              : estimated USD 0.0285 per run at the configured price
 
 The price is a configured parameter, not an invoice. No billed amount is claimed.
 
-## 7. Why B and C cannot be measured offline
+## 7. Why the offline mode cannot substitute for B and C
 
-The offline mode substitutes `OfflineFixtureRunner`, a deterministic regex runner
-that ignores the prompt entirely. Running `--mode offline` with prompt v2 therefore
-produces byte-identical output to prompt v1, and would measure nothing about the
-prompt. Only `--mode online` exercises the agents.
+`--mode offline` replaces the agents with `OfflineFixtureRunner`, a deterministic regex
+runner that ignores the prompt. Its output therefore says nothing about prompt v2, and
+an offline B/C comparison would only exercise the verifier against regex findings. It
+validates the harness, not the model.
 
-A second constraint: B and C must share the same raw model output to isolate the
-verifier, but the eval harness calls the model once per rung. Calling twice is the
-only way to obtain real output for each prompt, and for B vs C the prompt is
-identical, so their outputs should match. To guarantee that, B and C will be run
-from the same prompt version and the two recordings compared; any divergence is
-model nondeterminism and will be reported as run-to-run variance rather than as an
-effect of the verifier.
+The shared-input requirement is solved differently: `evals/ablation.py` makes **one**
+model pass and freezes the output before any verification, then replays the same
+findings through both verifier configurations. No second model call, so no model
+nondeterminism can enter the B/C comparison.
 
 ## 8. Limitations
 
@@ -205,7 +209,37 @@ effect of the verifier.
    file. It cannot follow data across functions or modules, which is why cross-file
    issues return `UNKNOWN` rather than a verdict.
 
-## 9. Is a critic worth adding?
+## 9. The B/C harness
+
+`evals/ablation.py` implements the shared-input requirement:
+
+1. One pass calls the model (or the deterministic runner) and the flow freezes
+   `state.raw_findings` before its own verification.
+2. Rung B replays those frozen findings with `check_conditions=False`.
+3. Rung C replays the *same* frozen findings with `check_conditions=True`.
+4. Both rungs are scored by the same evaluator against the same ground truth.
+
+A single model pass is therefore enough, and the only difference between B and C is
+layer 2. Rung A is not part of this harness: it is the archived prompt-v1 output, which
+differs in prompt *and* output schema, so it is re-scored separately by
+`evals.replay_v1`. Mistaking A→B for a prompt-only improvement would be wrong, and the
+harness refuses to imply it by keeping A out.
+
+Offline exercise of the harness (deterministic runner, no model):
+
+| Rung | P | R | F1 | Strict F1 | TP | FP | FN | Rejections | Advisories |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A-raw (no verifier) | 1.000 | 1.000 | 1.000 | 1.000 | 10 | 0 | 0 | 0 | 0 |
+| B (layer 1) | 1.000 | 1.000 | 1.000 | 1.000 | 10 | 0 | 0 | 0 | 0 |
+| C (layer 1 + 2) | 1.000 | 0.900 | 0.947 | 0.900 | 9 | 0 | 1 | 0 | 1 |
+
+This only proves the plumbing: the offline runner emits no false claims, so layer 2 has
+nothing to reject and only the `test-gap-07` demotion shows up. It is **not** evidence
+about layer 2's effect on real model output. `test_ablation_replays_the_same_raw_findings_for_both_rungs`
+covers the mechanism with a synthetic false SQL claim: B keeps it (`fp=1`), C rejects
+it (`condition_not_met`, `fp=0`), and the shared input is byte-identical afterwards.
+
+## 10. Is a critic worth adding?
 
 Not yet, and the current data argues against it:
 
@@ -222,17 +256,29 @@ Not yet, and the current data argues against it:
 Recommendation: run B and C, and only consider a critic if C's advisory rate is high
 while its defect recall is already acceptable.
 
-## 10. Next command, pending budget approval
+## 11. Next command, pending budget approval
 
 ```bash
-# B: v2 prompt, layer 1 only
-PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic \
-  --model deepseek/deepseek-chat --condition-checks off --output artifacts/evals/rung-b
+# plan only, no tokens
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online --dry-run
 
-# C: v2 prompt, layer 1 + 2
-PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic \
-  --model deepseek/deepseek-chat --condition-checks on --output artifacts/evals/rung-c
+# one model pass, both verifier rungs, one report
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
+  --model deepseek/deepseek-chat --output artifacts/evals/ablation
 ```
 
-Estimated at USD 0.03 per rung with the configured price, about 3 minutes each.
-Three repetitions each, for variance, would be about USD 0.17.
+Measured dry-run output:
+
+```
+model calls     : about 41 (one pass; both rungs reuse the same raw findings)
+verifier passes : 2 (condition checks off, then on)
+estimated cost  : USD 0.0285 at the configured price
+```
+
+For variance, run the whole harness three times and report the spread. Each repetition
+costs one model pass, not two, because both rungs share the findngs.
+
+Artifacts written by a real run: `ablation.json` holding the per-rung scores, the
+frozen `raw_findings` for every case, the verified findings for each rung, verifier
+rejection reasons per type, token usage, call counts and latency. Nothing is
+overwritten: each run gets its own UTC timestamp directory.

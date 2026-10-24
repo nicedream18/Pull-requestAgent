@@ -1,3 +1,4 @@
+
 import pytest
 
 from evals.fixtures import FixtureClient, load_dataset, snapshot_for
@@ -8,6 +9,8 @@ from prguard.models import (
     Finding,
     FindingType,
     IssueType,
+    PRFile,
+    PRSnapshot,
     VerificationStatus,
 )
 from prguard.verifier import changed_lines, verify_findings
@@ -60,22 +63,51 @@ def test_condition_check_confirms_every_labeled_defect(case_id, issue_type, expe
     assert verdict.reason
 
 
-def test_test_gap_needs_test_suite_context_and_stays_unknown():
+def test_test_gap_without_retrieved_tests_stays_unknown():
     case = CASES["test-gap-07"]
     verdict = evaluate_condition(IssueType.MISSING_TEST_COVERAGE, case["code"], case["line_range"][0])
     assert verdict.status == UNKNOWN
-    assert "does not enumerate the test suite" in verdict.reason
+    assert "cannot prove absence" in verdict.reason
 
 
-def test_test_gap_is_refuted_when_tests_are_supplied():
+def test_test_gap_is_refuted_only_when_the_test_references_the_function():
     case = CASES["test-gap-07"]
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
         case["code"],
         case["line_range"][0],
-        test_paths_for_module={"tests/test_transfers.py"},
+        test_sources={"tests/test_transfers.py": "from app.transfers import transfer_funds\n"},
     )
     assert verdict.status == CONTRADICTED
+    assert "transfer_funds" in verdict.reason
+
+
+def test_an_unrelated_test_file_does_not_refute_a_test_gap():
+    """A test file that exists but never touches this function proves nothing."""
+    case = CASES["test-gap-07"]
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        case["code"],
+        case["line_range"][0],
+        test_sources={"tests/test_unrelated.py": "def test_something_else():\n    assert True\n"},
+    )
+    assert verdict.status == UNKNOWN
+    assert "none references" in verdict.reason
+
+
+def test_a_test_file_mentioning_the_function_does_not_prove_path_coverage():
+    """Even a referenced function may lack the specific failure-path test."""
+    case = CASES["test-gap-07"]
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        case["code"],
+        case["line_range"][0],
+        test_sources={"tests/test_transfers.py": "def test_happy_path():\n    transfer_funds(a, b, 1)\n"},
+    )
+    # The check only claims the function is exercised, so it refutes "no tests at all"
+    # but the reason must stay scoped to that claim.
+    assert verdict.status == CONTRADICTED
+    assert "references transfer_funds" in verdict.reason
 
 
 @pytest.mark.parametrize(
@@ -560,7 +592,12 @@ OPTIONAL_GUARD_FORMS = {
 
 @pytest.mark.parametrize("form", sorted(OPTIONAL_GUARD_FORMS))
 def test_optional_none_guards_are_recognised(form):
-    verdict = evaluate_condition(IssueType.NULL_DEREFERENCE, OPTIONAL_GUARD_FORMS[form], 6)
+    source = OPTIONAL_GUARD_FORMS[form]
+    # The use is the first line that dereferences the optional parameter.
+    use_line = next(
+        index + 1 for index, line in enumerate(source.splitlines()) if "user.name" in line
+    )
+    verdict = evaluate_condition(IssueType.NULL_DEREFERENCE, source, use_line)
     assert verdict.status == CONTRADICTED, form
 
 
@@ -631,3 +668,214 @@ def test_test_gap_is_refuted_when_the_context_contains_the_test_file():
     verified, rejected = verify_findings([finding], snapshot, sources)
     assert verified == []
     assert rejected[0]["type"] == "condition_not_met"
+
+
+def test_verifier_never_mutates_the_input_findings():
+    case = CASES["sql-injection-05"]
+    snapshot, sources = snapshot_for(case)
+    finding = make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(case, 2),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Interpolated name reaches the query string.",
+        trigger_condition="name comes from the request",
+    )
+    before = finding.model_dump()
+    verified, _ = verify_findings([finding], snapshot, sources)
+    assert finding.model_dump() == before
+    assert verified[0] is not finding
+    assert verified[0].verification_status is VerificationStatus.VERIFIED
+
+
+def test_verifier_does_not_mutate_input_when_it_demotes():
+    case = CASES["test-gap-07"]
+    snapshot, sources = snapshot_for(case)
+    finding = make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(case, 2),
+        category="testing",
+        issue_type=IssueType.MISSING_TEST_COVERAGE,
+        title="transfer 缺少失败路径测试",
+        description="debit 与 credit 之间存在部分失败风险，但没有测试覆盖。",
+    )
+    before = finding.model_dump()
+    verified, _ = verify_findings([finding], snapshot, sources)
+    assert verified[0].finding_type is FindingType.ADVISORY
+    assert finding.model_dump() == before
+    assert finding.finding_type is FindingType.DEFECT
+
+
+def test_flow_keeps_a_pre_verifier_snapshot_independent_of_the_result():
+    case = CASES["sql-injection-05"]
+    payload = make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(case, 2),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Interpolated name reaches the query string.",
+        trigger_condition="name comes from the request",
+    )
+    state = _flow_with_claims("sql-injection-05", [payload], True)
+    assert len(state.raw_findings) == len(state.verified_findings) == 1
+    assert state.raw_findings[0].verification_status is VerificationStatus.UNCERTAIN
+    assert state.verified_findings[0].verification_status is VerificationStatus.VERIFIED
+    assert state.raw_findings[0] is not state.verified_findings[0]
+
+
+def test_pre_and_post_verifier_scores_use_the_same_matcher_and_truth():
+    case = CASES["sql-injection-05"]
+    payload = make_finding(
+        file_path=case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(case, 2),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Interpolated name reaches the query string.",
+        trigger_condition="name comes from the request",
+    )
+    state = _flow_with_claims("sql-injection-05", [payload], True)
+    pre = evaluate_cases([case], {case["case_id"]: list(state.raw_findings)})
+    post = evaluate_cases([case], {case["case_id"]: list(state.verified_findings)})
+    assert pre["evaluator_version"] == post["evaluator_version"]
+    assert pre["tp"] == post["tp"] == 1
+    assert pre["fp"] == post["fp"] == 0
+
+
+def _two_defects_one_safe(safe_line: int, risky_line: int) -> str:
+    return (
+        "def safe_search(cursor, name):\n"
+        "    cursor.execute('SELECT * FROM users WHERE name = %s', (name,))\n"
+        "\n"
+        "def risky_search(cursor, name):\n"
+        "    cursor.execute(f'SELECT * FROM users WHERE name = {name}')\n"
+    )
+
+
+def test_a_real_defect_elsewhere_does_not_leak_into_a_safe_location():
+    source = _two_defects_one_safe(2, 5)
+    safe = evaluate_condition(IssueType.SQL_INJECTION, source, 2)
+    risky = evaluate_condition(IssueType.SQL_INJECTION, source, 5)
+    assert safe.status == CONTRADICTED
+    assert risky.status == SUPPORTED
+
+
+def test_verifier_rejects_a_claim_about_the_safe_half_of_a_mixed_file():
+    """One file, one genuine defect and one safe call; a finding on the safe call is wrong."""
+    source = _two_defects_one_safe(2, 5)
+    snapshot = PRSnapshot(
+        repo="acme/widgets",
+        pr_number=1,
+        title="mixed",
+        base_sha="base",
+        head_sha="head",
+        files=[PRFile(path="app/search.py", status="modified", patch="+x", changes=1)],
+        diff="diff --git a/app/search.py b/app/search.py\n@@ -1,5 +1,5 @@\n" + "".join(
+            f"+{line}\n" for line in source.splitlines()
+        ),
+    )
+    finding = make_finding(
+        file_path="app/search.py",
+        start_line=2,
+        end_line=2,
+        evidence="cursor.execute('SELECT * FROM users WHERE name = %s', (name,))",
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL injection in safe_search",
+        description="Claimed injection on the parameterized half of the file.",
+    )
+    verified, rejected = verify_findings([finding], snapshot, {"app/search.py": source})
+    assert verified == []
+    assert rejected[0]["type"] == "condition_not_met"
+
+
+def test_off_by_one_without_indexing_is_not_a_defect():
+    source = "def loop(items):\n    for i in range(len(items) + 1):\n        print(i)\n"
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == CONTRADICTED
+    assert "never used to index" in verdict.reason
+
+
+def test_off_by_one_with_indexing_is_a_defect():
+    source = "def loop(items):\n    for i in range(len(items) + 1):\n        print(items[i])\n"
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+
+
+def test_off_by_one_with_a_bounds_guard_is_not_a_defect():
+    source = (
+        "def loop(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i >= len(items):\n"
+        "            break\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == CONTRADICTED
+    assert "bounds-checked" in verdict.reason
+
+
+def test_ambiguous_location_with_multiple_functions_returns_unknown():
+    source = _two_defects_one_safe(2, 5)
+    verdict = evaluate_condition(IssueType.SQL_INJECTION, source, None)
+    assert verdict.status == UNKNOWN
+    assert "does not identify a single function" in verdict.reason
+
+
+def test_ablation_replays_the_same_raw_findings_for_both_rungs():
+    from evals.ablation import _replay_verifier
+    from prguard.models import FlowState
+
+    safe_case = CASES["safe-sql-08"]
+    risky_case = CASES["sql-injection-05"]
+    false_claim = make_finding(
+        file_path=safe_case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(safe_case, 2),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Claimed injection on the parameterized query.",
+        trigger_condition="name comes from the request",
+    )
+    true_claim = make_finding(
+        file_path=risky_case["file_path"],
+        start_line=2,
+        end_line=2,
+        evidence=evidence_at(risky_case, 2),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Interpolated name reaches the query string.",
+        trigger_condition="name comes from the request",
+    )
+    cases = [safe_case, risky_case]
+    states = [
+        FlowState(raw_findings=[false_claim]),
+        FlowState(raw_findings=[true_claim]),
+    ]
+    frozen = [[item.model_dump() for item in state.raw_findings] for state in states]
+
+    b_scores, b_rejections = _replay_verifier(cases, states, check_conditions=False)
+    c_scores, c_rejections = _replay_verifier(cases, states, check_conditions=True)
+
+    # The rungs must not disturb the shared input.
+    assert [[item.model_dump() for item in state.raw_findings] for state in states] == frozen
+    assert b_scores["evaluator_version"] == c_scores["evaluator_version"]
+    # Layer 2 removes the false claim and keeps the true one.
+    assert b_rejections["total"] == 0
+    assert c_rejections["total"] == 1
+    assert c_rejections["by_type"] == {"condition_not_met": 1}
+    assert b_scores["fp"] == 1 and c_scores["fp"] == 0
+    assert b_scores["tp"] == c_scores["tp"] == 1

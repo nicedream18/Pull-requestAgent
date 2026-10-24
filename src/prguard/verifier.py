@@ -77,18 +77,45 @@ TEST_FILE = re.compile(r"(^|/)(tests?|testing)/|(^|/)test_[^/]+\.py$|_test\.py$"
 
 
 def _test_paths_for(module_path: str, candidates: set[str] | None) -> set[str]:
-    """Test files in the supplied context that plausibly cover `module_path`."""
+    """Test files in the supplied context that correspond to `module_path`.
+
+    The match must be about this module. A name that merely starts with ``test_``
+    says nothing about which module it exercises, so it is not accepted: doing so
+    let one unrelated test file refute every test-gap claim in the repository.
+    """
     if not candidates:
         return set()
-    stem = module_path.rsplit("/", 1)[-1].removesuffix(".py")
+    parts = module_path.split("/")
+    stem = parts[-1].removesuffix(".py")
+    package = parts[-2] if len(parts) > 1 else ""
+    if not stem:
+        return set()
+
+    accepted = {
+        f"test_{stem}.py",
+        f"{stem}_test.py",
+        f"tests_{stem}.py",
+    }
     found = set()
     for path in candidates:
-        name = path.rsplit("/", 1)[-1]
-        if not TEST_FILE.search(path) or not path.endswith(".py"):
+        if not path.endswith(".py") or not TEST_FILE.search(path):
             continue
-        if stem and (stem in name or name.startswith("test_")):
+        name = path.rsplit("/", 1)[-1]
+        if name in accepted:
+            found.add(path)
+            continue
+        # tests/test_users.py covering app/models/users.py: match the package too.
+        if package and name in {f"test_{package}.py", f"{package}_test.py"}:
             found.add(path)
     return found
+
+
+def _test_sources_for(module_path: str, source_map: dict[str, str]) -> dict[str, str]:
+    """Retrieved test files for this module together with their contents."""
+    return {
+        path: source_map.get(path, "")
+        for path in _test_paths_for(module_path, set(source_map))
+    }
 
 
 @dataclass
@@ -158,14 +185,14 @@ def verify_findings(
 ) -> tuple[list[Finding], list[dict[str, str]]]:
     """Layer 1 deterministic checks, layer 2 condition checks, then deduplicate."""
     valid_paths = {file.path for file in snapshot.files} | (related_paths or set())
-    # A retrieved file is evidence even when it is not part of the changed set, and
-    # the test-coverage check needs to see those paths.
-    known_paths = valid_paths | set(source_map)
     touched = changed_lines(snapshot)
     accepted: list[Finding] = []
     rejected: list[dict[str, str]] = []
 
-    for finding in findings:
+    for original in findings:
+        # Verify a copy: callers keep the agent output for pre-verifier scoring and
+        # for replay, so it must stay byte-identical after verification.
+        finding = original.model_copy(deep=True)
         failure = _layer_one(finding, snapshot, source_map, valid_paths)
         if failure is not None:
             rejected.append(failure.as_dict(finding))
@@ -194,7 +221,7 @@ def verify_findings(
                 finding.issue_type,
                 source_map.get(finding.file_path, ""),
                 finding.start_line,
-                test_paths_for_module=_test_paths_for(finding.file_path, known_paths),
+                test_sources=_test_sources_for(finding.file_path, source_map),
             )
             if verdict.status == CONTRADICTED:
                 rejected.append(
