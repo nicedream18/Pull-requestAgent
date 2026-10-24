@@ -35,3 +35,10 @@ packages = ["src/prguard", "src/code_review_crew_for_github_pull_request", "eval
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

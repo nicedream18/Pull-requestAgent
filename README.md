@@ -77,7 +77,39 @@ The command writes timestamped `results.json`, `results.csv`, `benchmark.md`, an
 uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
 ```
 
-See [evaluation](docs/evaluation.md) for the matching rule and [benchmark](docs/benchmark.md) for the current offline record.
+See [evaluation](docs/evaluation.md) for the matching rule, [benchmark](docs/benchmark.md) for the measured records, and [false-positive-analysis](docs/false-positive-analysis.md) for the audit of the first online run.
+
+## Review quality controls
+
+Prompt `prguard-review-v2` and the evidence-aware verifier replace "more findings" with "provable findings". The changes are reactive: each one addresses a cause identified in [docs/false-positive-analysis.md](docs/false-positive-analysis.md), which audits the 68 false positives of the first online run.
+
+**Finding classification.** Every finding carries a closed-vocabulary `issue_type`, a `finding_type` of `defect` or `advisory`, and, for defects, a `trigger_condition`, `expected_behavior` and `actual_behavior`. A defect without a trigger condition is demoted to advisory by schema validation rather than accepted as a confirmed bug.
+
+**Agent scope and abstention.** Each agent may only emit its own issue types, and returning an empty list is explicitly the preferred answer when nothing is provable. `TestImpactAgent` may report `missing_test_coverage` as a defect only when the changed code performs multi-resource mutations or side-effecting writes; otherwise a coverage gap is advice.
+
+**Three-layer verification.**
+
+| Layer | Check | Outcome |
+| --- | --- | --- |
+| 1 | schema, trusted path, line range, verbatim evidence, changed-file association, duplicate merge | reject fabricated locations |
+| 2 | AST defect-condition check per `issue_type` (parameterized query, `shell=False`, closed handle, guarded divisor, `with open`, bound placeholder, mode bits, secret literal, off-by-one loop, Optional deref) | `condition_not_met` rejects; unresolved claims are demoted to advisory with `needs_human_review` |
+| 3 | optional critic for low-evidence or conflicting findings | **not implemented**; requires a token budget and is deliberately absent from the reported results |
+
+Layer 2 uses syntax trees, and only uses text matching to *refute* a claim. A file that merely mentions `sql_injection` is never treated as proof, which is covered by a test.
+
+**Evaluation accounting.** Advisories no longer enter defect precision, but the evaluator also reports `strict_precision` where advisories count as false positives, plus `advisory_rate`, `verifier_rejection_rate`, per-agent rejection rates, and verifier before/after counts. Labelling everything as advice therefore cannot raise the headline number.
+
+## Measured results
+
+| Record | Scope | Result |
+| --- | --- | --- |
+| Offline, current branch | deterministic fixture runner, 15 fixtures, 3 strategies | dynamic P 1.000 / R 1.000 / F1 1.000, 2.73 calls per PR, 10/10 labelled defects |
+| Online, `prguard-review-v1` | DeepSeek `deepseek-chat`, 15 fixtures, dynamic | P 0.093 / R 0.700 / F1 0.165, 7 TP / 68 FP / 3 FN, 3079 input tokens per PR, 10.96 s mean, 18.41 s P95 |
+| Online, `prguard-review-v2` + evidence-aware verifier | same fixtures | **not measured yet**; no online budget has been approved for this branch |
+
+The offline record is a pipeline regression test, not an LLM quality claim. The online v1 record is the baseline that the audit decomposes: of its 68 false positives, 44 (64.7%) were advice, style preferences or duplicates that the new classification keeps out of the defect count, 15 (22.1%) were real observations the fixtures do not label, and 9 (13.2%) were correct defects lost to the old language-and-line-sensitive matcher.
+
+
 
 ## API
 

@@ -23,6 +23,42 @@ class RiskLevel(StrEnum):
     LARGE = "large"
 
 
+class IssueType(StrEnum):
+    """Controlled defect vocabulary shared by agents, verifier and evaluation."""
+
+    NULL_DEREFERENCE = "null_dereference"
+    MISSING_EXCEPTION_HANDLING = "missing_exception_handling"
+    BOUNDARY_CONDITION = "boundary_condition"
+    RESOURCE_LEAK = "resource_leak"
+    SQL_INJECTION = "sql_injection"
+    UNSAFE_COMMAND = "unsafe_command"
+    MISSING_TEST_COVERAGE = "missing_test_coverage"
+    OVERLY_PERMISSIVE_FILE_MODE = "overly_permissive_file_mode"
+    DIVISION_BY_ZERO = "division_by_zero"
+    HARDCODED_SECRET = "hardcoded_secret"
+    CROSS_FILE_BREAKAGE = "cross_file_breakage"
+    OTHER = "other"
+
+
+class FindingType(StrEnum):
+    """A defect claims a provable wrong behavior; an advisory is an improvement."""
+
+    DEFECT = "defect"
+    ADVISORY = "advisory"
+
+
+class EvidenceLevel(StrEnum):
+    EXACT = "exact"
+    PARTIAL = "partial"
+    INFERRED = "inferred"
+
+
+class VerificationStatus(StrEnum):
+    VERIFIED = "verified"
+    UNCERTAIN = "uncertain"
+    REJECTED = "rejected"
+
+
 class PRReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -122,12 +158,38 @@ class Finding(BaseModel):
     source_agent: str = ""
     needs_human_review: bool = False
 
+    # Classification. `issue_type` is the deterministic channel used by the
+    # verifier and the evaluator, so it must stay a closed vocabulary.
+    issue_type: IssueType = IssueType.OTHER
+    finding_type: FindingType = FindingType.DEFECT
+    # A defect is only actionable when its trigger is stated; advisories may leave it blank.
+    trigger_condition: str = Field(default="", max_length=600)
+    expected_behavior: str = Field(default="", max_length=600)
+    actual_behavior: str = Field(default="", max_length=600)
+
+    # Populated by the verifier, not by the agent.
+    evidence_level: EvidenceLevel = EvidenceLevel.PARTIAL
+    verification_status: VerificationStatus = VerificationStatus.UNCERTAIN
+    rejection_reason: Optional[str] = Field(default=None, max_length=300)
+
     @model_validator(mode="after")
     def validate_lines(self) -> "Finding":
         if self.start_line and self.end_line and self.end_line < self.start_line:
             raise ValueError("end_line must be greater than or equal to start_line")
         if self.confidence < 0.55:
             self.needs_human_review = True
+        return self
+
+    @model_validator(mode="after")
+    def validate_defect_claims(self) -> "Finding":
+        # A defect without a location or trigger cannot be verified, so it is
+        # demoted rather than silently accepted as a confirmed defect.
+        if self.finding_type is FindingType.DEFECT:
+            if not self.trigger_condition.strip():
+                self.finding_type = FindingType.ADVISORY
+                self.needs_human_review = True
+            elif self.start_line is None:
+                self.needs_human_review = True
         return self
 
 

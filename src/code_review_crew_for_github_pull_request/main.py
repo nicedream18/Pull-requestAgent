@@ -4,7 +4,6 @@ import sys
 import warnings
 
 from code_review_crew_for_github_pull_request.crew import CodeReviewCrewForGithubPullRequestCrew
-from code_review_crew_for_github_pull_request.tools.github_tools import FetchPRFilesTool
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 

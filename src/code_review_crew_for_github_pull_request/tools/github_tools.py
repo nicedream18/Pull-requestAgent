@@ -251,7 +251,6 @@ class FindRelatedFilesTool(BaseTool):
         except Exception:
             return []
 
-        prefix = f"{directory}/" if directory else ""
         return [
             e.path
             for e in entries

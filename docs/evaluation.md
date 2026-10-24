@@ -20,6 +20,40 @@ Online evaluation uses the same fixtures and requires an API key. It is intentio
 PYTHONPATH=src .venv/bin/python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
 ```
 
-Matching is one-to-one. A prediction must use the same file and category, cite a line within two lines of the ground truth, and have at least 0.045 semantic token overlap with the label description. Duplicate predictions cannot count as multiple true positives. Precision and recall are `0.0` when their denominators are zero. Normal PRs are reported separately through false positives per no-defect PR.
+## Matching rules
 
-The command writes `results.json`, `results.csv`, `benchmark.md`, and `benchmark.svg` below the chosen output directory. Online scores must not be inferred when no API key is available.
+Matching is one-to-one and uses two channels. Both require the same `file_path`, and a finding that
+carries a line number must land within two lines of the labelled range.
+
+1. **Structured.** `finding.issue_type` equals the labelled `defect_type`. This is language
+   independent, which matters because agents answer in Chinese while the labels are English. Findings
+   without a line number can still match this way.
+2. **Text.** Same `category`, plus token overlap with the label description (a finding without a line
+   needs `>= 0.20`; a located finding needs `>= 0.045`).
+
+Duplicate predictions cannot count as multiple true positives. Precision and recall are `0.0` when
+their denominators are zero. `docs/false-positive-analysis.md` records why the text-only rule of
+`prguard-review-v1` under-credited correct findings.
+
+## Finding classes
+
+`finding_type=defect` (proven wrong behaviour) and `finding_type=advisory` (improvement suggestion) are
+scored separately:
+
+* `defect_precision` / `defect_recall` / `f1_score` count confirmed defects only.
+* `strict_precision` / `strict_recall` / `strict_f1` also count advisories as false positives.
+* `advisory_rate` and `needs_human_review_count` expose how much output was downgraded.
+
+Reporting both prevents a run from improving its headline number by relabelling findings as advice.
+`mean_findings_per_pr` and `false_positives_per_no_defect_pr` describe output volume.
+
+## Per-agent and verifier metrics
+
+Each run also records `raw_finding_count` (before verification), `verified_finding_count`,
+`verifier_rejection_rate`, `rejection_types` (`invalid_path`, `invalid_line`, `evidence_mismatch`,
+`condition_not_met`), and `agent_stats` with per-agent `accepted`, `rejected`, `rejection_rate` and
+`valid_ratio`. `verifier_rejection_rate` together with `defect_recall` shows whether rejected output
+was noise or lost recall.
+
+The command writes `results.json`, `results.csv`, `benchmark.md`, and `benchmark.svg` below the chosen
+output directory. Online scores must not be inferred when no API key is available.

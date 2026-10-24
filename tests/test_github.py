@@ -1,4 +1,3 @@
-import requests
 
 from prguard.github import GitHubClient, GitHubRequestError
 

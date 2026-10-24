@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync
+      - name: Lint
+        run: uvx ruff check src evals tests
+      - name: Unit tests
+        run: PYTHONPATH=src uv run pytest tests -q
+      - name: Offline benchmark
+        run: PYTHONPATH=src uv run python -m evals.run --mode offline --output artifacts/ci
+      - name: Assert offline benchmark still detects every labelled defect
+        run: |
+          python - <<'PY'
+          import glob, json, sys
+
+          path = sorted(glob.glob("artifacts/ci/*/results.json"))[-1]
+          data = json.load(open(path))
+          dynamic = data["strategies"]["dynamic"]
+          print(json.dumps({k: dynamic[k] for k in ("tp", "fp", "fn", "defect_precision", "defect_recall")}, indent=2))
+          if dynamic["tp"] != 10 or dynamic["fn"] != 0:
+              sys.exit("offline dynamic strategy regressed on the labelled fixtures")
+          if dynamic["defect_precision"] < 1.0:
+              sys.exit("offline dynamic strategy produced false positives on the fixtures")
+          PY
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

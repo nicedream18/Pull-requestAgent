@@ -40,7 +40,8 @@ def _markdown(state: FlowState, snapshot: PRSnapshot) -> str:
         lines.extend([
             f"### {index}. [{finding.severity.value.upper()}] {finding.title}",
             "",
-            f"`{location}` | `{finding.category}` | 置信度 `{finding.confidence:.2f}` | Agent `{finding.source_agent}`",
+            f"`{location}` | `{finding.category}` | `{finding.issue_type.value}` | `{finding.finding_type.value}` | "
+            f"`{finding.verification_status.value}` | 置信度 `{finding.confidence:.2f}` | Agent `{finding.source_agent}`",
             "",
             finding.description,
             "",
@@ -48,8 +49,12 @@ def _markdown(state: FlowState, snapshot: PRSnapshot) -> str:
             "",
             f"修复建议：{finding.suggestion}",
         ])
+        if finding.finding_type.value == "advisory":
+            lines.extend(["", "这是一条改进建议，不是已确认的缺陷。"])
         if finding.needs_human_review:
-            lines.extend(["", "由于置信度较低，需要人工复核。"])
+            lines.extend(["", "需要人工复核。"])
+        if finding.rejection_reason:
+            lines.extend(["", f"核验备注：{finding.rejection_reason}"])
         lines.extend(["", f"[Open code]({url})", ""])
     if state.errors:
         lines.extend(["## 部分失败", ""])

@@ -16,6 +16,12 @@ No online LLM result is recorded in this repository because no live API evaluati
 
 ## Online LLM record
 
+> **Status:** this record belongs to prompt `prguard-review-v1` with the layer-1-only verifier. The
+> current branch ships `prguard-review-v2`, which adds the issue-type taxonomy, defect/advisory
+> separation, abstention and AST condition checks. The numbers below are the *baseline* for the
+> ablation in `docs/false-positive-analysis.md`; they are not what the current code produces. A fresh
+> online run has not been executed because it has not been budgeted.
+
 An online run was executed on October 24, 2026 with `deepseek/deepseek-chat` and prompt `prguard-review-v1` over the same 15 fixtures (`mode=online`, `evaluation_type=live_llm_on_local_fixtures`):
 
 | Strategy | Precision | Recall | F1 | TP | FP | FN | Input tok/PR | Calls/PR | Mean s | P95 s | Agent fail rate |

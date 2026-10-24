@@ -4,11 +4,10 @@ import argparse
 import csv
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, load_dataset, snapshot_for
+from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
 from evals.metrics import aggregate_performance
 from prguard.agents import PROMPT_VERSION
 from prguard.flow import ReviewFlow
@@ -59,9 +58,12 @@ def _run_strategy(cases: list[dict], strategy: str, mode: str, output_dir: Path,
         flow.kickoff(inputs={"request": request.model_dump()})
         state = flow.state
         findings = state.verified_findings
+        rejection_types = {"invalid_path", "invalid_line", "evidence_mismatch", "condition_not_met"}
+        rejected = [item for item in state.errors if item.get("type") in rejection_types]
         case_results.append({
             "case_id": case["case_id"],
             "findings": findings,
+            "rejected": rejected,
             "run_metrics": {
                 "execution_seconds": state.execution_time,
                 "input_tokens": state.token_usage["input"],
@@ -74,6 +76,7 @@ def _run_strategy(cases: list[dict], strategy: str, mode: str, output_dir: Path,
                 "full_context_tokens": state.metrics.get("full_context_tokens", 0),
                 "optimized_context_tokens": state.metrics.get("input_tokens", 0),
                 "context_tokens_saved": state.metrics.get("context_tokens_saved", 0),
+                "raw_finding_count": len(state.findings),
             },
         })
         per_case_runs.append({
@@ -81,6 +84,7 @@ def _run_strategy(cases: list[dict], strategy: str, mode: str, output_dir: Path,
             "status": state.review_status,
             "selected_agents": state.selected_agents,
             "findings": [finding.model_dump(mode="json") for finding in findings],
+            "rejected": rejected,
             "errors": state.errors,
             **case_results[-1]["run_metrics"],
         })

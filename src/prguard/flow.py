@@ -288,6 +288,13 @@ class ReviewFlow(Flow[FlowState]):
         self._trace("verify_and_report", "success", started, verified_findings=len(verified), rejected_findings=len(rejected))
         self.state.execution_time = time.monotonic() - self._flow_started
         self.state.metrics["execution_seconds"] = self.state.execution_time
+        defects = [item for item in verified if item.finding_type.value == "defect"]
+        self.state.metrics["raw_findings"] = len(self.state.findings)
+        self.state.metrics["verified_findings"] = len(verified)
+        self.state.metrics["rejected_findings"] = len(rejected)
+        self.state.metrics["defect_findings"] = len(defects)
+        self.state.metrics["advisory_findings"] = len(verified) - len(defects)
+        self.state.metrics["needs_human_review"] = sum(1 for item in verified if item.needs_human_review)
         self.state.metrics["agent_failure_rate"] = (
             sum(run.status != "success" for run in self.state.agent_runs) / len(self.state.agent_runs)
             if self.state.agent_runs else 0

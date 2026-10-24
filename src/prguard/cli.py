@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 
 from prguard.flow import ReviewFlow
 from prguard.models import PRReviewRequest

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from prguard.context import approximate_tokens
-from prguard.models import AgentRun, Finding, PRFile, PRReviewRequest, PRSnapshot
+from prguard.models import AgentRun, Finding, FindingType, IssueType, PRFile, PRReviewRequest, PRSnapshot
 
 DATASET = Path(__file__).parent / "datasets" / "prguard_v1.json"
 
@@ -66,18 +66,18 @@ class OfflineFixtureRunner:
         findings: list[Finding] = []
         for path, source in self.sources.items():
             rules = [
-                ("SecurityAgent", r"execute\s*\(\s*f['\"]", "security", "critical", "SQL injection through string interpolation", "User input is interpolated into SQL, allowing query structure to be changed.", "Bind input values as query parameters."),
-                ("SecurityAgent", r"subprocess\.\w+\(.*shell\s*=\s*True", "security", "critical", "Shell command injection", "A shell is invoked with untrusted command input.", "Pass a validated argument vector and keep shell execution disabled."),
-                ("SecurityAgent", r"chmod\s*\([^\n]*0o777", "security", "high", "World-writable file permissions", "The file is made readable, writable, and executable by all users.", "Grant only the minimum required permissions."),
-                ("SecurityAgent", r"(?:api[_-]?token|api[_-]?key)\s*=\s*['\"](?:sk-|gh[pousr]_|[A-Za-z0-9_-]{24,})", "security", "critical", "Hard-coded credential", "A credential-like value is embedded in source.", "Load the credential from a secret store or environment."),
-                ("CodeQualityAgent", r"range\s*\(\s*len\([^)]*\)\s*\+\s*1\s*\)", "bug", "high", "Loop exceeds collection bounds", "The loop includes an index equal to the collection length.", "Use range(len(items)) or iterate directly over the items."),
-                ("CodeQualityAgent", r"return\s+user\.\w+", "bug", "high", "Possible null dereference", "The optional user is dereferenced without checking for None.", "Check for None before accessing user attributes."),
-                ("CodeQualityAgent", r"json\.loads\s*\(", "bug", "medium", "Malformed JSON is not handled", "Invalid JSON raises an exception that escapes this parsing boundary.", "Handle JSONDecodeError and return a clear validation error."),
-                ("CodeQualityAgent", r"(?m)^\s*\w+\s*=\s*open\s*\(", "bug", "medium", "File handle may leak", "The opened file is not managed by a context manager.", "Use `with open(...)` to close the handle on every path."),
-                ("CodeQualityAgent", r"\breturn\s+[^\n]+\s/\s*\w+", "bug", "medium", "Possible division by zero", "The divisor can be zero and is not checked.", "Validate the divisor before division."),
-                ("TestImpactAgent", r"def\s+transfer_funds\s*\(", "testing", "medium", "Transfer failure paths lack tests", "The transfer mutates two accounts but the fixture provides no tests for debit or credit failure.", "Add tests for invalid amounts and partial failure rollback."),
+                ("SecurityAgent", r"execute\s*\(\s*f['\"]", "security", "critical", IssueType.SQL_INJECTION, "SQL injection through string interpolation", "User input is interpolated into SQL, allowing query structure to be changed.", "Bind input values as query parameters."),
+                ("SecurityAgent", r"subprocess\.\w+\(.*shell\s*=\s*True", "security", "critical", IssueType.UNSAFE_COMMAND, "Shell command injection", "A shell is invoked with untrusted command input.", "Pass a validated argument vector and keep shell execution disabled."),
+                ("SecurityAgent", r"chmod\s*\([^\n]*0o777", "security", "high", IssueType.OVERLY_PERMISSIVE_FILE_MODE, "World-writable file permissions", "The file is made readable, writable, and executable by all users.", "Grant only the minimum required permissions."),
+                ("SecurityAgent", r"(?:api[_-]?token|api[_-]?key)\s*=\s*['\"](?:sk-|gh[pousr]_|[A-Za-z0-9_-]{24,})", "security", "critical", IssueType.HARDCODED_SECRET, "Hard-coded credential", "A credential-like value is embedded in source.", "Load the credential from a secret store or environment."),
+                ("CodeQualityAgent", r"range\s*\(\s*len\([^)]*\)\s*\+\s*1\s*\)", "bug", "high", IssueType.BOUNDARY_CONDITION, "Loop exceeds collection bounds", "The loop includes an index equal to the collection length.", "Use range(len(items)) or iterate directly over the items."),
+                ("CodeQualityAgent", r"return\s+user\.\w+", "bug", "high", IssueType.NULL_DEREFERENCE, "Possible null dereference", "The optional user is dereferenced without checking for None.", "Check for None before accessing user attributes."),
+                ("CodeQualityAgent", r"json\.loads\s*\(", "bug", "medium", IssueType.MISSING_EXCEPTION_HANDLING, "Malformed JSON is not handled", "Invalid JSON raises an exception that escapes this parsing boundary.", "Handle JSONDecodeError and return a clear validation error."),
+                ("CodeQualityAgent", r"(?m)^\s*\w+\s*=\s*open\s*\(", "bug", "medium", IssueType.RESOURCE_LEAK, "File handle may leak", "The opened file is not managed by a context manager.", "Use `with open(...)` to close the handle on every path."),
+                ("CodeQualityAgent", r"\breturn\s+[^\n]+\s/\s*\w+", "bug", "medium", IssueType.DIVISION_BY_ZERO, "Possible division by zero", "The divisor can be zero and is not checked.", "Validate the divisor before division."),
+                ("TestImpactAgent", r"def\s+transfer_funds\s*\(", "testing", "medium", IssueType.MISSING_TEST_COVERAGE, "Transfer failure paths lack tests", "The transfer mutates two accounts but the fixture provides no tests for debit or credit failure.", "Add tests for invalid amounts and partial failure rollback."),
             ]
-            for target_agent, pattern, category, severity, title, description, suggestion in rules:
+            for target_agent, pattern, category, severity, issue_type, title, description, suggestion in rules:
                 if target_agent != agent:
                     continue
                 match = re.search(pattern, source, flags=re.IGNORECASE)
@@ -88,6 +88,11 @@ class OfflineFixtureRunner:
                 findings.append(Finding(
                     category=category,
                     severity=severity,
+                    issue_type=issue_type,
+                    finding_type=FindingType.DEFECT,
+                    trigger_condition=description,
+                    expected_behavior="The risky value is validated or contained before use.",
+                    actual_behavior=description,
                     file_path=path,
                     start_line=line,
                     end_line=line,

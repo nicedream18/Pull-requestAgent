@@ -126,7 +126,9 @@ def _start_dashboard_job(payload: DashboardReviewRequest) -> str:
     })
 
     def worker() -> None:
-        event_sink = lambda event: _append_event(run_id, event)
+        def event_sink(event: dict) -> None:
+            _append_event(run_id, event)
+
         with _lock:
             _jobs[run_id]["status"] = "running"
         _append_event(run_id, {
