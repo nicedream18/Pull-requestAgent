@@ -81,6 +81,31 @@ Each run also records `raw_finding_count` (before verification),
 rejected output was noise or lost recall. `mean_findings_per_pr` and
 `false_positives_per_no_defect_pr` describe output volume.
 
+## Condition verdicts
+
+`prguard.evidence` answers one question per finding: is the stated defect condition
+provable from the supplied file? It returns three values.
+
+| Verdict | Meaning | Effect in `verify_findings` |
+| --- | --- | --- |
+| `SUPPORTED` | the reported call site itself contains the construct that makes the claim true | `verification_status=verified` |
+| `CONTRADICTED` | the reported call site disproves the claim | rejected with `condition_not_met` |
+| `UNKNOWN` | the supplied context cannot decide | a defect is demoted to advisory with `needs_human_review` |
+
+Evidence is tied to the reported location. A check collects the candidate nodes in the
+resolved block, then accepts only the node whose span contains the reported line, or
+the single candidate within a short distance. If the line cannot be tied to any
+candidate, the answer is `UNKNOWN`; a check never borrows a construct from a different
+call site in the same function.
+
+`missing_test_coverage` distinguishes three levels, because a diff cannot prove that a
+test is absent:
+
+1. a retrieved test asserts an exception around the function -> `CONTRADICTED`
+2. a retrieved test calls the function on the happy path, or merely mentions it ->
+   `UNKNOWN`
+3. no test content was retrieved -> `UNKNOWN`
+
 ## Verifier isolation
 
 Pre-verifier and post-verifier scores must describe the same input, so the pipeline

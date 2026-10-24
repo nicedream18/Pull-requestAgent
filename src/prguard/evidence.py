@@ -263,6 +263,45 @@ def _calls(tree: ast.AST, names: set[str]) -> list[ast.Call]:
     return [node for node in ast.walk(tree) if isinstance(node, ast.Call) and _dotted(node.func) in names]
 
 
+LOCATE_SLACK = 1
+SCOPE_SLACK = 3
+
+
+def _locate(nodes: list[ast.AST], line: int | None) -> ast.AST | None:
+    """Pick the node the finding actually points at.
+
+    A check must never use evidence from another call site to judge this one, so a
+    candidate is only accepted when it can be tied to the reported line:
+
+    * the line is inside the node's span, or
+    * exactly one candidate sits within ``LOCATE_SLACK`` lines, or
+    * the scope holds a single candidate within ``SCOPE_SLACK`` lines (the common
+      "reported the enclosing statement" case).
+
+    Anything else, including two equally close candidates, returns ``None`` so the
+    caller can answer ``UNKNOWN`` instead of borrowing unrelated evidence.
+    """
+    if not nodes:
+        return None
+    if line is None:
+        return nodes[0] if len(nodes) == 1 else None
+
+    inside = [node for node in nodes if _span(node)[0] <= line <= _span(node)[1]]
+    if inside:
+        return min(inside, key=lambda node: abs(_span(node)[0] - line))
+
+    ordered = sorted(nodes, key=lambda node: abs(_span(node)[0] - line))
+    best = ordered[0]
+    distance = abs(_span(best)[0] - line)
+    if distance == 0:
+        return best
+    limit = LOCATE_SLACK if len(nodes) > 1 else SCOPE_SLACK
+    if distance > limit:
+        return None
+    ties = [node for node in ordered if abs(_span(node)[0] - line) == distance]
+    return ties[0] if len(ties) == 1 else None
+
+
 def _check_sql_injection(
     tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
@@ -281,104 +320,148 @@ def _check_sql_injection(
             return ConditionVerdict(UNKNOWN, "database usage is present but no SQL execution call is recognised")
         return ConditionVerdict(CONTRADICTED, "the reported block contains no database call, so it cannot inject SQL")
 
-    for call in calls:
-        if not call.args:
-            return ConditionVerdict(UNKNOWN, "SQL call passes no query argument")
-        query = call.args[0]
-        if isinstance(query, (ast.JoinedStr, ast.BinOp)):
-            return ConditionVerdict(SUPPORTED, "query string is built by interpolation", call.lineno)
-        if isinstance(query, ast.Call) and isinstance(query.func, ast.Attribute) and query.func.attr == "format":
-            return ConditionVerdict(SUPPORTED, "query string is built with str.format", call.lineno)
-        if isinstance(query, ast.Constant) and isinstance(query.value, str):
-            has_placeholder = "?" in query.value or "%s" in query.value
-            if not has_placeholder:
-                return ConditionVerdict(CONTRADICTED, "query is a constant with no interpolation point", call.lineno)
-            if len(call.args) >= 2 or any(kw.arg == "params" for kw in call.keywords):
-                return ConditionVerdict(
-                    CONTRADICTED, "query uses bound placeholders with separate parameters", call.lineno
-                )
+    call = _locate(calls, context.line)
+    if call is None:
+        return ConditionVerdict(
+            UNKNOWN,
+            f"the reported line is not tied to one of the {len(calls)} query calls in this block, "
+            "so another call site cannot be used as evidence",
+        )
+    if not call.args:
+        return ConditionVerdict(UNKNOWN, "SQL call passes no query argument", call.lineno)
+
+    query = call.args[0]
+    if isinstance(query, (ast.JoinedStr, ast.BinOp)):
+        return ConditionVerdict(SUPPORTED, "query string is built by interpolation", call.lineno)
+    if isinstance(query, ast.Call) and isinstance(query.func, ast.Attribute) and query.func.attr == "format":
+        return ConditionVerdict(SUPPORTED, "query string is built with str.format", call.lineno)
+    if isinstance(query, ast.Constant) and isinstance(query.value, str):
+        has_placeholder = "?" in query.value or "%s" in query.value
+        if not has_placeholder:
+            return ConditionVerdict(CONTRADICTED, "query is a constant with no interpolation point", call.lineno)
+        if len(call.args) >= 2 or any(kw.arg == "params" for kw in call.keywords):
             return ConditionVerdict(
-                UNDETERMINED, "query has placeholders but no parameters are passed here", call.lineno
+                CONTRADICTED, "query uses bound placeholders with separate parameters", call.lineno
             )
-    return ConditionVerdict(UNKNOWN, "a query-like call is present but its argument is not statically classifiable")
+        return ConditionVerdict(
+            UNKNOWN, "query has placeholders but no parameters are passed here", call.lineno
+        )
+    return ConditionVerdict(UNKNOWN, "the query argument is not statically classifiable", call.lineno)
 
 
 def _check_unsafe_command(
     tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
     scope = scope or tree
-    for node in ast.walk(scope):
-        if not isinstance(node, ast.Call):
-            continue
-        dotted = _dotted(node.func)
-        if dotted in SHELL_SINKS:
-            return ConditionVerdict(SUPPORTED, f"{dotted} always passes the command to a shell", node.lineno)
-        if dotted in SUBPROCESS_CALLS or dotted.startswith("subprocess."):
-            shell = next((kw for kw in node.keywords if kw.arg == "shell"), None)
-            if shell is not None and isinstance(shell.value, ast.Constant) and shell.value.value is True:
-                if dotted.endswith("create_subprocess_exec"):
-                    return ConditionVerdict(CONTRADICTED, "create_subprocess_exec never uses a shell", node.lineno)
-                return ConditionVerdict(SUPPORTED, "subprocess is invoked with shell=True", node.lineno)
-            if dotted == "asyncio.create_subprocess_shell":
-                return ConditionVerdict(SUPPORTED, "create_subprocess_shell always uses a shell", node.lineno)
-    if _calls(scope, SUBPROCESS_CALLS):
-        return ConditionVerdict(CONTRADICTED, "every subprocess call in this block runs without shell=True")
-    return ConditionVerdict(UNKNOWN, "no recognised shell or subprocess invocation in the reported block")
+    sinks = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Call)
+        and (
+            _dotted(node.func) in SHELL_SINKS
+            or _dotted(node.func) in SUBPROCESS_CALLS
+            or _dotted(node.func).startswith("subprocess.")
+        )
+    ]
+    if not sinks:
+        return ConditionVerdict(UNKNOWN, "no recognised shell or subprocess invocation in the reported block")
+
+    call = _locate(sinks, context.line)
+    if call is None:
+        return ConditionVerdict(
+            UNKNOWN,
+            f"the reported line is not tied to one of the {len(sinks)} process calls in this block",
+        )
+
+    dotted = _dotted(call.func)
+    if dotted in SHELL_SINKS:
+        return ConditionVerdict(SUPPORTED, f"{dotted} always passes the command to a shell", call.lineno)
+    if dotted == "asyncio.create_subprocess_shell":
+        return ConditionVerdict(SUPPORTED, "create_subprocess_shell always uses a shell", call.lineno)
+    if dotted.endswith("create_subprocess_exec"):
+        return ConditionVerdict(CONTRADICTED, "create_subprocess_exec never uses a shell", call.lineno)
+    if any(kw.arg is None for kw in call.keywords):
+        # `**kwargs` may carry shell=True, so absence here proves nothing.
+        return ConditionVerdict(
+            UNKNOWN, "a keyword-argument unpacking could supply shell=True, so this call cannot be cleared", call.lineno
+        )
+    shell = next((kw for kw in call.keywords if kw.arg == "shell"), None)
+    if shell is not None and isinstance(shell.value, ast.Constant) and shell.value.value is True:
+        return ConditionVerdict(SUPPORTED, "subprocess is invoked with shell=True", call.lineno)
+    if any(kw.arg == "shell" for kw in call.keywords):
+        return ConditionVerdict(CONTRADICTED, "shell is passed a non-true value", call.lineno)
+    if len(call.args) >= 2 and isinstance(call.args[0], ast.Constant):
+        return ConditionVerdict(CONTRADICTED, "a constant string program is executed without a shell", call.lineno)
+    return ConditionVerdict(CONTRADICTED, "subprocess runs without shell=True", call.lineno)
 
 
 def _check_file_mode(
     tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
     scope = scope or tree
-    for node in ast.walk(scope):
-        if not isinstance(node, ast.Call):
-            continue
-        if _dotted(node.func) not in {"os.chmod", "chmod", "os.fchmod", "pathlib.Path.chmod"} and not (
-            isinstance(node.func, ast.Attribute) and node.func.attr == "chmod"
-        ):
-            continue
-        mode_arg = node.args[1] if len(node.args) >= 2 else next(
-            (kw.value for kw in node.keywords if kw.arg == "mode"), None
+    calls = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Call)
+        and (
+            _dotted(node.func) in {"os.chmod", "chmod", "os.fchmod", "pathlib.Path.chmod"}
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "chmod")
         )
-        if mode_arg is None:
-            return ConditionVerdict(UNKNOWN, "chmod is called without a resolvable mode argument", node.lineno)
-        if not isinstance(mode_arg, ast.Constant) or not isinstance(mode_arg.value, int):
-            return ConditionVerdict(UNKNOWN, "file mode is not a literal, so other-user access cannot be proven", node.lineno)
-        mode = mode_arg.value
-        if mode & 0o002:
-            return ConditionVerdict(SUPPORTED, f"mode {oct(mode)} grants write access to other users", node.lineno)
-        return ConditionVerdict(CONTRADICTED, f"mode {oct(mode)} does not grant other-user write", node.lineno)
-    return ConditionVerdict(UNKNOWN, "no chmod call in the reported block")
+    ]
+    if not calls:
+        return ConditionVerdict(UNKNOWN, "no chmod call in the reported block")
+
+    call = _locate(calls, context.line)
+    if call is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(calls)} chmod calls in this block"
+        )
+    mode_arg = call.args[1] if len(call.args) >= 2 else next(
+        (kw.value for kw in call.keywords if kw.arg == "mode"), None
+    )
+    if mode_arg is None:
+        return ConditionVerdict(UNKNOWN, "chmod is called without a resolvable mode argument", call.lineno)
+    if not isinstance(mode_arg, ast.Constant) or not isinstance(mode_arg.value, int):
+        return ConditionVerdict(UNKNOWN, "file mode is not a literal, so other-user access cannot be proven", call.lineno)
+    mode = mode_arg.value
+    if mode & 0o002:
+        return ConditionVerdict(SUPPORTED, f"mode {oct(mode)} grants write access to other users", call.lineno)
+    return ConditionVerdict(CONTRADICTED, f"mode {oct(mode)} does not grant other-user write", call.lineno)
 
 
 def _check_hardcoded_secret(
     tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    loaded_from_environment = False
     scope = scope or tree
+    assignments = []
     for node in ast.walk(scope):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        value = node.value
-        names = [t.id for t in targets if isinstance(t, ast.Name)]
-        if not any(SECRET_NAME.search(name) for name in names):
-            continue
-        if isinstance(value, ast.Call):
-            callee = _dotted(value.func)
-            if callee.endswith("getenv") or callee in {"os.environ.get", "environ.get"}:
-                loaded_from_environment = True
-            continue
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            if SECRET_VALUE.match(value.value.strip()):
-                return ConditionVerdict(
-                    SUPPORTED, f"{names[0]} is assigned a credential-like literal", node.lineno
-                )
-            return ConditionVerdict(CONTRADICTED, f"{names[0]} is assigned a short non-credential literal", node.lineno)
-        return ConditionVerdict(UNKNOWN, f"{names[0]} is assigned a value that is not a literal", node.lineno)
-    if loaded_from_environment:
-        return ConditionVerdict(CONTRADICTED, "the secret-named value is read from the environment")
-    return ConditionVerdict(UNKNOWN, "no credential-named assignment in the reported scope")
+        if any(isinstance(t, ast.Name) and SECRET_NAME.search(t.id) for t in targets):
+            assignments.append(node)
+    if not assignments:
+        return ConditionVerdict(UNKNOWN, "no credential-named assignment in the reported scope")
+
+    node = _locate(assignments, context.line)
+    if node is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(assignments)} credential assignments"
+        )
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    names = [t.id for t in targets if isinstance(t, ast.Name)]
+    label = names[0] if names else "the credential"
+    value = node.value
+    if isinstance(value, ast.Call):
+        callee = _dotted(value.func)
+        if callee.endswith("getenv") or callee in {"os.environ.get", "environ.get"}:
+            return ConditionVerdict(CONTRADICTED, f"{label} is read from the environment", node.lineno)
+        return ConditionVerdict(UNKNOWN, f"{label} is assigned a call result that cannot be inspected", node.lineno)
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        if SECRET_VALUE.match(value.value.strip()):
+            return ConditionVerdict(SUPPORTED, f"{label} is assigned a credential-like literal", node.lineno)
+        return ConditionVerdict(CONTRADICTED, f"{label} is assigned a short non-credential literal", node.lineno)
+    return ConditionVerdict(UNKNOWN, f"{label} is assigned a value that is not a literal", node.lineno)
 
 
 def _check_division_by_zero(
@@ -387,47 +470,32 @@ def _check_division_by_zero(
     scope = scope or tree
     function = scope if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
     params = _params(function) if function is not None else set()
-    for node in ast.walk(scope):
-        if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
-            continue
-        divisor = node.right
-        if isinstance(divisor, ast.Constant):
-            if divisor.value in (0, 0.0):
-                return ConditionVerdict(SUPPORTED, "divisor is the literal zero", node.lineno)
-            return ConditionVerdict(CONTRADICTED, "divisor is a non-zero literal", node.lineno)
-        name = divisor.id if isinstance(divisor, ast.Name) else None
-        if name is None:
-            return ConditionVerdict(UNKNOWN, "divisor is an expression, not a named parameter", node.lineno)
-        if name not in params:
-            return ConditionVerdict(UNKNOWN, f"divisor '{name}' is not a parameter of this function", node.lineno)
-        if _zero_guarded(scope, name, node.lineno):
-            return ConditionVerdict(CONTRADICTED, f"divisor '{name}' is guarded before the division", node.lineno)
-        return ConditionVerdict(SUPPORTED, f"divisor '{name}' is a parameter with no zero guard", node.lineno)
-    return ConditionVerdict(UNKNOWN, "no division found in the reported block")
+    divisions = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod))
+    ]
+    if not divisions:
+        return ConditionVerdict(UNKNOWN, "no division found in the reported block")
 
-
-def _zero_guarded(scope: ast.AST, name: str, use_line: int) -> bool:
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Assert):
-            text = ast.unparse(node.test)
-            if _name_checked(text, name) and _span(node)[0] < use_line:
-                return True
-        if not isinstance(node, ast.If):
-            continue
-        text = ast.unparse(node.test)
-        if not _name_checked(text, name):
-            continue
-        start, end = _span(node)
-        if f"{name} == 0" in text or f"not {name}" in text or f"{name} <=" in text or f"{name} <" in text:
-            if end < use_line and _exits(node):
-                return True
-        if f"{name} != 0" in text or f"{name} >" in text:
-            if start <= use_line <= end:
-                return True
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Call) and _dotted(node.func) in {"max", "abs"} and node.args:
-            continue
-    return False
+    node = _locate(divisions, context.line)
+    if node is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(divisions)} divisions in this block"
+        )
+    divisor = node.right
+    if isinstance(divisor, ast.Constant):
+        if divisor.value in (0, 0.0):
+            return ConditionVerdict(SUPPORTED, "divisor is the literal zero", node.lineno)
+        return ConditionVerdict(CONTRADICTED, "divisor is a non-zero literal", node.lineno)
+    name = divisor.id if isinstance(divisor, ast.Name) else None
+    if name is None:
+        return ConditionVerdict(UNKNOWN, "divisor is an expression, not a named parameter", node.lineno)
+    if name not in params:
+        return ConditionVerdict(UNKNOWN, f"divisor '{name}' is not a parameter of this function", node.lineno)
+    if _zero_guarded(scope, name, node.lineno):
+        return ConditionVerdict(CONTRADICTED, f"divisor '{name}' is guarded before the division", node.lineno)
+    return ConditionVerdict(SUPPORTED, f"divisor '{name}' is a parameter with no zero guard", node.lineno)
 
 
 def _check_resource_leak(
@@ -441,17 +509,24 @@ def _check_resource_leak(
     ]
     if not opens:
         return ConditionVerdict(UNKNOWN, "no open() call in the reported block")
+
+    node = _locate(opens, context.line)
+    if node is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(opens)} open() calls in this block"
+        )
+    if _inside(node, scope, (ast.With, ast.AsyncWith)):
+        return ConditionVerdict(CONTRADICTED, "the reported open() call is inside a with-block", node.lineno)
     closed = any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "close"
-        for node in ast.walk(scope)
+        isinstance(other, ast.Call)
+        and isinstance(other.func, ast.Attribute)
+        and other.func.attr == "close"
+        and other.lineno >= node.lineno
+        for other in ast.walk(scope)
     )
-    for node in opens:
-        if _inside(node, scope, (ast.With, ast.AsyncWith)):
-            continue
-        if closed:
-            return ConditionVerdict(UNKNOWN, "handle is closed explicitly somewhere, so coverage is path dependent", node.lineno)
-        return ConditionVerdict(SUPPORTED, "handle opened outside a with-block and never closed", node.lineno)
-    return ConditionVerdict(CONTRADICTED, "every open() call in this block is inside a with-block")
+    if closed:
+        return ConditionVerdict(UNKNOWN, "a close() call exists on a later path, so coverage is path dependent", node.lineno)
+    return ConditionVerdict(SUPPORTED, "the reported open() call is outside a with-block and never closed", node.lineno)
 
 
 def _check_missing_exception_handling(
@@ -461,13 +536,16 @@ def _check_missing_exception_handling(
     calls = [node for node in ast.walk(scope) if isinstance(node, ast.Call) and _dotted(node.func) in RAISING_CALLS]
     if not calls:
         return ConditionVerdict(UNKNOWN, "no exception-raising call in the reported block")
-    unguarded = [node for node in calls if not _inside(node, scope, (ast.Try,))]
-    if not unguarded:
-        return ConditionVerdict(CONTRADICTED, "every raising call in this block is inside a try block")
+
+    node = _locate(calls, context.line)
+    if node is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(calls)} raising calls in this block"
+        )
+    if _inside(node, scope, (ast.Try,)):
+        return ConditionVerdict(CONTRADICTED, "the reported call is inside a try block", node.lineno)
     return ConditionVerdict(
-        SUPPORTED,
-        f"{len(unguarded)} raising call(s) such as {_dotted(unguarded[0].func)} escape without a handler",
-        unguarded[0].lineno,
+        SUPPORTED, f"{_dotted(node.func)} escapes without a handler at this location", node.lineno
     )
 
 
@@ -480,19 +558,28 @@ def _check_null_dereference(
     optional = _optional_params(function)
     if not optional:
         return ConditionVerdict(CONTRADICTED, "the function has no Optional-typed parameter")
-    unguarded = None
-    for node in ast.walk(function):
-        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
-            continue
-        if node.value.id not in optional:
-            continue
-        if not _guard_protects(function, node.value.id, node.lineno):
-            unguarded = node
-            break
-    if unguarded is None:
-        return ConditionVerdict(CONTRADICTED, "every Optional parameter is guarded before use")
+
+    reads = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in optional
+    ]
+    if not reads:
+        return ConditionVerdict(CONTRADICTED, "no Optional parameter is read as an attribute")
+
+    node = _locate(reads, context.line)
+    if node is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(reads)} dereferences in this function"
+        )
+    if _guard_protects(function, node.value.id, node.lineno):
+        return ConditionVerdict(CONTRADICTED, f"'{node.value.id}' is guarded before this dereference", node.lineno)
     return ConditionVerdict(
-        SUPPORTED, f"'{unguarded.value.id}' is Optional and read as .{unguarded.attr} with no dominating None check", unguarded.lineno
+        SUPPORTED,
+        f"'{node.value.id}' is Optional and read as .{node.attr} with no dominating None check",
+        node.lineno,
     )
 
 
@@ -501,54 +588,67 @@ def _check_boundary(
 ) -> ConditionVerdict:
     """Confirm an off-by-one only when the extra iteration actually indexes out of range."""
     scope = scope or tree
+    loops = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and isinstance(node.iter, ast.Call)
+        and _dotted(node.iter.func) == "range"
+        and len(node.iter.args) == 1
+    ]
+    if not loops:
+        if any(isinstance(node, ast.Subscript) for node in ast.walk(scope)):
+            return ConditionVerdict(UNKNOWN, "indexing is present but no loop bound can be inspected")
+        return ConditionVerdict(UNKNOWN, "the reported block has no loop bound to inspect")
 
-    for node in ast.walk(scope):
-        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
-            continue
-        iterable = node.iter
-        if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
-            continue
-        arg = iterable.args[0]
-        if not (
-            isinstance(arg, ast.BinOp)
-            and isinstance(arg.op, ast.Add)
-            and isinstance(arg.right, ast.Constant)
-            and arg.right.value == 1
-            and isinstance(arg.left, ast.Call)
-            and _dotted(arg.left.func) == "len"
-        ):
-            continue
-        index = node.target.id
-        # The extra iteration is only a defect if the body reads through the index.
+    loop = _locate(loops, context.line)
+    if loop is None:
+        return ConditionVerdict(
+            UNKNOWN, f"the reported line is not tied to one of the {len(loops)} loops in this block"
+        )
+    index = loop.target.id
+    arg = loop.iter.args[0]
+
+    if (
+        isinstance(arg, ast.BinOp)
+        and isinstance(arg.op, ast.Add)
+        and isinstance(arg.right, ast.Constant)
+        and arg.right.value == 1
+        and isinstance(arg.left, ast.Call)
+        and _dotted(arg.left.func) == "len"
+    ):
         reads = [
             sub
-            for sub in ast.walk(node)
+            for sub in ast.walk(loop)
             if isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Name) and sub.slice.id == index
         ]
         if not reads:
             return ConditionVerdict(
                 CONTRADICTED,
                 f"range(len(...) + 1) iterates once more but {index} is never used to index, so it cannot raise",
-                node.lineno,
+                loop.lineno,
             )
-        if _loop_guards_index(node, index):
+        guard = _dominating_guard(loop, index, reads)
+        if guard is not None:
             return ConditionVerdict(
-                CONTRADICTED, f"{index} is bounds-checked inside the loop before it is used", reads[0].lineno
+                CONTRADICTED,
+                f"the extra iteration is dominated by a bounds check at line {guard.lineno}",
+                reads[0].lineno,
             )
         return ConditionVerdict(
             SUPPORTED,
             f"range(len(...) + 1) with {index} used as an index reads one past the end",
-            node.lineno,
+            loop.lineno,
         )
 
-    for node in ast.walk(scope):
+    for node in ast.walk(loop):
         if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
             continue
         right = node.comparators[0] if node.comparators else None
         if right is None:
             continue
         op = node.ops[0]
-        name = node.left.id
         if isinstance(right, ast.Call) and _dotted(right.func) == "len":
             if isinstance(op, ast.LtE):
                 return ConditionVerdict(
@@ -570,45 +670,59 @@ def _check_boundary(
             return ConditionVerdict(
                 CONTRADICTED, f"bound subtracts one from len(), so it stays in range: {ast.unparse(node)}", node.lineno
             )
-        del name
 
+    subscripts = [sub for sub in ast.walk(loop) if isinstance(sub, ast.Subscript)]
+    if subscripts and all(
+        isinstance(sub.slice, ast.Name) and sub.slice.id == index for sub in subscripts
+    ):
+        return ConditionVerdict(
+            CONTRADICTED, f"for {index} in range(len(...)) indexes exactly the valid range", loop.lineno
+        )
+    return ConditionVerdict(UNKNOWN, "the loop bound relation is not statically decidable")
+
+
+def _zero_guarded(scope: ast.AST, name: str, use_line: int) -> bool:
     for node in ast.walk(scope):
-        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+        if isinstance(node, ast.Assert):
+            text = ast.unparse(node.test)
+            if _name_checked(text, name) and _span(node)[0] < use_line:
+                return True
+        if not isinstance(node, ast.If):
             continue
-        iterable = node.iter
-        if not isinstance(iterable, ast.Call) or _dotted(iterable.func) != "range" or len(iterable.args) != 1:
+        text = ast.unparse(node.test)
+        if not _name_checked(text, name):
             continue
-        arg = iterable.args[0]
-        if not (isinstance(arg, ast.Call) and _dotted(arg.func) == "len"):
-            continue
-        subscripts = [sub for sub in ast.walk(node) if isinstance(sub, ast.Subscript)]
-        if subscripts and all(
-            isinstance(sub.slice, ast.Name) and sub.slice.id == node.target.id for sub in subscripts
-        ):
-            return ConditionVerdict(
-                CONTRADICTED,
-                f"for {node.target.id} in range(len(...)) indexes exactly the valid range",
-                node.lineno,
-            )
-
-    if any(isinstance(node, ast.Subscript) for node in ast.walk(scope)):
-        return ConditionVerdict(UNKNOWN, "indexing is present but the bound relation is not statically decidable")
-    return ConditionVerdict(UNKNOWN, "the reported block has no loop bound to inspect")
+        start, end = _span(node)
+        if f"{name} == 0" in text or f"not {name}" in text or f"{name} <=" in text or f"{name} <" in text:
+            if end < use_line and _exits(node):
+                return True
+        if f"{name} != 0" in text or f"{name} >" in text:
+            if start <= use_line <= end:
+                return True
+    return False
 
 
-def _loop_guards_index(loop: ast.For, index: str) -> bool:
-    """True when the loop body bounds-checks `index` before reading through it."""
+def _dominating_guard(loop: ast.For, index: str, reads: list[ast.Subscript]) -> ast.If | None:
+    """Return the bounds check that actually protects every read of `index`.
+
+    Position matters: a rejecting guard (`if i >= len(x): break`) only protects reads
+    that come after it, and a positive guard (`if i < len(x):`) only protects reads
+    inside its body.
+    """
     exits = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    read_lines = [_span(read)[0] for read in reads]
     for node in ast.walk(loop):
         if not isinstance(node, ast.If) or not _name_checked(ast.unparse(node.test), index):
             continue
+        start, end = _span(node)
         if _compare_against_length(node.test, index) and _exits_with(node, exits):
-            # `if i >= len(seq): break` skips the out-of-range iteration.
-            return True
-        bodies = [sub for sub in ast.walk(node) if isinstance(sub, ast.Subscript)]
-        if bodies and isinstance(node.test, ast.Compare) and _guards_positive(node.test, index):
-            return True
-    return False
+            if all(end < line for line in read_lines):
+                return node
+            continue
+        if _guards_positive(node.test, index):
+            if any(start <= line <= end for line in read_lines):
+                return node
+    return None
 
 
 def _compare_against_length(test: ast.AST, index: str) -> bool:
@@ -624,9 +738,9 @@ def _compare_against_length(test: ast.AST, index: str) -> bool:
     return isinstance(test.ops[0], (ast.GtE, ast.Gt, ast.Eq))
 
 
-def _guards_positive(test: ast.Compare, index: str) -> bool:
+def _guards_positive(test: ast.AST, index: str) -> bool:
     """`if i < len(seq):` wraps a safe access."""
-    if not isinstance(test.left, ast.Name) or test.left.id != index:
+    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name) or test.left.id != index:
         return False
     right = test.comparators[0] if test.comparators else None
     if not (isinstance(right, ast.Call) and _dotted(right.func) == "len"):
@@ -639,19 +753,57 @@ def _exits_with(node: ast.If, kinds: tuple[type, ...]) -> bool:
     return any(isinstance(statement, kinds) for statement in body)
 
 
+RAISES_HELPERS = {"raises", "assertRaises", "assertRaisesRegex", "pytest.raises", "raises"}
+
+
+def _is_raises_context(expr: ast.AST) -> bool:
+    # `with pytest.raises(...)` is a Call; `with self.assertRaises(...)` is also a Call.
+    target = expr.func if isinstance(expr, ast.Call) else expr
+    dotted = _dotted(target)
+    return dotted.split(".")[-1] in RAISES_HELPERS or dotted.endswith(("raises", "assertRaises"))
+
+
+def _test_exercises_failure_path(test_source: str, name: str) -> bool:
+    """True when the test asserts an exception around a call to `name`."""
+    try:
+        tree = ast.parse(test_source)
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        if not any(_is_raises_context(item.context_expr) for item in node.items):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and _dotted(sub.func).split(".")[-1] == name:
+                return True
+    return False
+
+
+def _test_calls_function(test_source: str, name: str) -> bool:
+    try:
+        tree = ast.parse(test_source)
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _dotted(node.func).split(".")[-1] == name:
+            return True
+    return False
+
+
 def _check_missing_test_coverage(
     tree: ast.AST, scope: ast.AST | None, source: str, context: "ConditionContext"
 ) -> ConditionVerdict:
-    """A diff cannot prove that no test exists, and a test file does not prove coverage.
+    """Three levels, because a diff cannot prove the absence of a test.
 
-    Outcomes:
+    * a retrieved test asserts an exception around the changed function -> CONTRADICTED
+    * a retrieved test calls it, but only on the happy path -> UNKNOWN, because the
+      claimed failure path is still untested
+    * a retrieved test merely mentions it, or no test was retrieved -> UNKNOWN
+    * the changed code has no risky behaviour -> CONTRADICTED, there is nothing to cover
 
-    * a test file for this module references the changed function -> CONTRADICTED
-    * a test file for this module exists but does not reference it -> UNKNOWN, because
-      the retrieved test content may be partial or may cover the function indirectly
-    * no test file in the retrieved context -> UNKNOWN for risky code, since absence
-      from a bounded retrieval window is not proof of absence
-    * the changed code has no risky behaviour -> CONTRADICTED, it is not a defect
+    Reference is not coverage, and coverage of a normal path is not coverage of the
+    failure path the finding is about.
     """
     scope = scope or tree
     mutations = {
@@ -670,28 +822,35 @@ def _check_missing_test_coverage(
             "the changed code has no multi-resource mutation or side effect, so a test gap is advice, not a defect",
         )
 
-    tests = context.test_sources or {}
+    tests = {path: text for path, text in (context.test_sources or {}).items() if text}
+    name = context.function_name
     if not tests:
         return ConditionVerdict(
             UNKNOWN,
-            "the changed code is risky but no test file was retrieved, and a bounded context cannot prove absence",
+            "the changed code is risky but no test content was retrieved, and a bounded context cannot prove absence",
         )
-
-    name = context.function_name
-    if name:
-        referencing = sorted(path for path, text in tests.items() if re.search(rf"\b{re.escape(name)}\b", text or ""))
-        if referencing:
-            return ConditionVerdict(
-                CONTRADICTED, f"a retrieved test file references {name}: {referencing[0]}"
-            )
+    if not name:
         return ConditionVerdict(
             UNKNOWN,
-            f"test files were retrieved ({', '.join(sorted(tests)[:2])}) but none references {name}, "
-            "and indirect coverage cannot be ruled out from the supplied text",
+            "test files were retrieved but the reported line does not identify which function they should cover",
+        )
+
+    failure = sorted(path for path, text in tests.items() if _test_exercises_failure_path(text, name))
+    if failure:
+        return ConditionVerdict(
+            CONTRADICTED, f"a retrieved test asserts an exception around {name}: {failure[0]}"
+        )
+    calling = sorted(path for path, text in tests.items() if _test_calls_function(text, name))
+    if calling:
+        return ConditionVerdict(
+            UNKNOWN,
+            f"a retrieved test calls {name} on the happy path only ({calling[0]}), so the claimed "
+            "failure path is still unproven",
         )
     return ConditionVerdict(
         UNKNOWN,
-        "test files were retrieved but the reported line does not identify which function they should cover",
+        f"retrieved test files ({', '.join(sorted(tests)[:2])}) do not call {name}, and indirect "
+        "coverage cannot be ruled out from the supplied text",
     )
 
 

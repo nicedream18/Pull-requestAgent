@@ -17,8 +17,10 @@ actually run in this workspace. Nothing is projected.
 
 | Area | Before | After |
 | --- | --- | --- |
-| Test-coverage check | any `test_*.py` in context refuted every module's test-gap claim; a module-specific test file refuted it even when the test never touched the function | the test file must be named for this module **and** contain the function name; otherwise `UNKNOWN` |
+| Test-coverage check | any `test_*.py` in context refuted every module's test-gap claim; a module test file refuted it as soon as the function name appeared in it | three levels: a test asserting an exception around the function refutes the gap; a happy-path call or a bare mention returns `UNKNOWN` |
 | AST scope | checks walked the whole file, so a defect at line 2 proved a finding at line 5 in a different function | checks walk only the resolved block: the enclosing function, or module-level statements |
+| AST call site | inside one function, a check judged the *first* matching call, so a safe call at line 3 refuted a finding on the risky call at line 5 | candidates are tied to the reported line; if none is, the answer is `UNKNOWN` instead of borrowing another call site |
+| Bounds guard | any length comparison anywhere in the loop counted as a guard, including one placed after the read | the guard must dominate every read: reject-style guards must precede them, positive guards must contain them |
 | Boundary check | `range(len(x) + 1)` anywhere in the file was `SUPPORTED` | requires the loop index to actually be used to subscript, and no in-loop bounds guard |
 | Verifier mutation | `verify_findings` wrote `evidence_level`, `verification_status` and `trigger_condition` onto the caller's objects | it verifies a deep copy; the flow also freezes `state.raw_findings` before verification |
 | Matching | file + category + line window + token overlap; a finding without `start_line` could match | defect only, same file, concrete line within ±2, evidence present verbatim in the changed file, then `issue_type` equality or a documented text fallback |
@@ -114,7 +116,32 @@ isolate a real effect, because they share the same prompt and differ only in the
 `condition_checks` flag. B/A comparisons mix a prompt change with a measurement
 change and must be labeled as such.
 
-## 4. Offline baseline after all changes
+## 4. The single offline false negative
+
+`dynamic` recall is 0.900 rather than 1.000, and exactly one labelled defect is
+unconfirmed: `test-gap-07` (`missing_test_coverage`).
+
+The finding is still produced and still reported. The verifier demotes it to
+`advisory` with:
+
+```
+the changed code is risky but no test content was retrieved, and a bounded
+context cannot prove absence
+```
+
+Why this is correct rather than a bug: the fixture is a single 9-line file with no test
+directory, and the claim is "the transfer has no test for its debit/credit failure
+path". Nothing in the supplied context can prove a test does not exist — only a whole
+repository listing could. Returning `SUPPORTED` would mean asserting an absence from a
+bounded window, which is exactly the kind of unprovable claim this work removes.
+
+Recall is therefore not recovered by weakening the rule. It can only move if the
+retrieval step supplies the test files, at which point the three-level check decides:
+a `pytest.raises` around the function refutes the gap, a happy-path call or a bare
+mention does not. The expected effect of that retrieval work is one labelled defect
+moving from advisory back to confirmed, not a change to the metric.
+
+## 5. Offline baseline after all changes
 
 Command:
 
@@ -141,7 +168,7 @@ still reported, as an advisory flagged for human review, and `advisory_rate` sho
 the trade explicitly. The CI assertion was updated to permit exactly this one miss
 and to fail on any other change.
 
-## 5. Verifier contribution, measured without an LLM
+## 6. Verifier contribution, measured without an LLM
 
 The layer-1/layer-2 split is covered by tests rather than by the replay, because the
 recording has already been through a verifier. `tests/test_false_positive_controls.py`
@@ -156,7 +183,7 @@ fixture:
 That is a real, reproducible measurement of layer 2, but it is one synthetic claim.
 It shows the mechanism works; it does not quantify the FP reduction on live output.
 
-## 6. Cost
+## 7. Cost
 
 Measured from the recorded v1 run:
 
@@ -180,7 +207,7 @@ cost              : estimated USD 0.0285 per run at the configured price
 
 The price is a configured parameter, not an invoice. No billed amount is claimed.
 
-## 7. Why the offline mode cannot substitute for B and C
+## 8. Why the offline mode cannot substitute for B and C
 
 `--mode offline` replaces the agents with `OfflineFixtureRunner`, a deterministic regex
 runner that ignores the prompt. Its output therefore says nothing about prompt v2, and
@@ -192,7 +219,7 @@ model pass and freezes the output before any verification, then replays the same
 findings through both verifier configurations. No second model call, so no model
 nondeterminism can enter the B/C comparison.
 
-## 8. Limitations
+## 9. Limitations
 
 1. **15 fixtures.** Each labelled case holds exactly one defect. A correct but
    unlabelled observation is still charged as a false positive, which caps the
@@ -205,11 +232,23 @@ nondeterminism can enter the B/C comparison.
    nothing, but any future relabelling to `other` will silently lose recall.
 4. **B and C are unmeasured.** No claim about whether prompt v2 or the evidence-aware
    verifier improves real precision is made in this document.
-5. **Layer 2 is syntax-level.** It proves a construct exists or is absent in one
-   file. It cannot follow data across functions or modules, which is why cross-file
-   issues return `UNKNOWN` rather than a verdict.
+5. **Layer 2 is syntax-level.** It proves a construct exists or is absent at the
+   reported call site in one file. It cannot follow data across functions or modules,
+   which is why cross-file issues return `UNKNOWN` rather than a verdict.
+6. **Residual false-rejection risk in layer 2.** Auditing the checks found and fixed
+   three ways a real defect could be rejected: another call site in the same function,
+   a bounds guard that did not dominate the read, and `subprocess.run(cmd, **opts)`
+   being cleared even though `**opts` may carry `shell=True` (now `UNKNOWN`). The
+   remaining known gaps are patterns the checks do not model, and those return
+   `UNKNOWN` rather than `CONTRADICTED`:
+   - SQL built through helper functions or class attributes
+   - `NullType` guards written as `if not isinstance(user, X)` (a false positive, not a
+     false rejection)
+   - shell invocation through a wrapper the checker does not recognise
+   A wrong `SUPPORTED` shows up as a false positive; a wrong `CONTRADICTED` would
+   remove a real defect, so the checks are written to prefer `UNKNOWN`.
 
-## 9. The B/C harness
+## 10. The B/C harness
 
 `evals/ablation.py` implements the shared-input requirement:
 
@@ -239,7 +278,7 @@ about layer 2's effect on real model output. `test_ablation_replays_the_same_raw
 covers the mechanism with a synthetic false SQL claim: B keeps it (`fp=1`), C rejects
 it (`condition_not_met`, `fp=0`), and the shared input is byte-identical afterwards.
 
-## 10. Is a critic worth adding?
+## 11. Is a critic worth adding?
 
 Not yet, and the current data argues against it:
 
@@ -256,7 +295,7 @@ Not yet, and the current data argues against it:
 Recommendation: run B and C, and only consider a critic if C's advisory rate is high
 while its defect recall is already acceptable.
 
-## 11. Next command, pending budget approval
+## 12. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens

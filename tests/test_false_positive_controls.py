@@ -70,7 +70,8 @@ def test_test_gap_without_retrieved_tests_stays_unknown():
     assert "cannot prove absence" in verdict.reason
 
 
-def test_test_gap_is_refuted_only_when_the_test_references_the_function():
+def test_a_test_file_mentioning_the_function_is_not_coverage():
+    """Referencing a function is not evidence that its failure path is tested."""
     case = CASES["test-gap-07"]
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
@@ -78,8 +79,47 @@ def test_test_gap_is_refuted_only_when_the_test_references_the_function():
         case["line_range"][0],
         test_sources={"tests/test_transfers.py": "from app.transfers import transfer_funds\n"},
     )
-    assert verdict.status == CONTRADICTED
-    assert "transfer_funds" in verdict.reason
+    assert verdict.status == UNKNOWN
+    assert "do not call" in verdict.reason
+
+
+def test_a_happy_path_test_is_not_failure_path_coverage():
+    case = CASES["test-gap-07"]
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        case["code"],
+        case["line_range"][0],
+        test_sources={"tests/test_transfers.py": "def test_happy():\n    transfer_funds(a, b, 1)\n"},
+    )
+    assert verdict.status == UNKNOWN
+    assert "happy path only" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "label,source",
+    [
+        (
+            "pytest.raises",
+            "import pytest\n\ndef test_failure():\n    with pytest.raises(ValueError):\n"
+            "        transfer_funds(a, b, -1)\n",
+        ),
+        (
+            "assertRaises",
+            "import unittest\n\nclass T(unittest.TestCase):\n    def test_failure(self):\n"
+            "        with self.assertRaises(ValueError):\n            transfer_funds(a, b, -1)\n",
+        ),
+    ],
+)
+def test_a_failure_path_assertion_refutes_the_gap(label, source):
+    case = CASES["test-gap-07"]
+    verdict = evaluate_condition(
+        IssueType.MISSING_TEST_COVERAGE,
+        case["code"],
+        case["line_range"][0],
+        test_sources={"tests/test_transfers.py": source},
+    )
+    assert verdict.status == CONTRADICTED, label
+    assert "asserts an exception" in verdict.reason
 
 
 def test_an_unrelated_test_file_does_not_refute_a_test_gap():
@@ -92,22 +132,18 @@ def test_an_unrelated_test_file_does_not_refute_a_test_gap():
         test_sources={"tests/test_unrelated.py": "def test_something_else():\n    assert True\n"},
     )
     assert verdict.status == UNKNOWN
-    assert "none references" in verdict.reason
+    assert "do not call" in verdict.reason
 
 
-def test_a_test_file_mentioning_the_function_does_not_prove_path_coverage():
-    """Even a referenced function may lack the specific failure-path test."""
+def test_an_unrelated_test_calling_its_own_function_does_not_help():
     case = CASES["test-gap-07"]
     verdict = evaluate_condition(
         IssueType.MISSING_TEST_COVERAGE,
         case["code"],
         case["line_range"][0],
-        test_sources={"tests/test_transfers.py": "def test_happy_path():\n    transfer_funds(a, b, 1)\n"},
+        test_sources={"tests/test_transfers.py": "def test_other():\n    charge_card(1)\n"},
     )
-    # The check only claims the function is exercised, so it refutes "no tests at all"
-    # but the reason must stay scoped to that claim.
-    assert verdict.status == CONTRADICTED
-    assert "references transfer_funds" in verdict.reason
+    assert verdict.status == UNKNOWN
 
 
 @pytest.mark.parametrize(
@@ -654,7 +690,12 @@ def test_test_gap_is_refuted_when_the_context_contains_the_test_file():
     case = CASES["test-gap-07"]
     snapshot, sources = snapshot_for(case)
     sources = dict(sources)
-    sources["tests/test_transfers.py"] = "from app.transfers import transfer_funds\n\ndef test_partial_failure():\n    ...\n"
+    sources["tests/test_transfers.py"] = (
+        "import pytest\n\n"
+        "def test_partial_failure():\n"
+        "    with pytest.raises(RuntimeError):\n"
+        "        transfer_funds(a, b, 1)\n"
+    )
     finding = make_finding(
         file_path=case["file_path"],
         start_line=2,
@@ -822,7 +863,7 @@ def test_off_by_one_with_a_bounds_guard_is_not_a_defect():
     )
     verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
     assert verdict.status == CONTRADICTED
-    assert "bounds-checked" in verdict.reason
+    assert "dominated by a bounds check" in verdict.reason
 
 
 def test_ambiguous_location_with_multiple_functions_returns_unknown():
@@ -879,3 +920,130 @@ def test_ablation_replays_the_same_raw_findings_for_both_rungs():
     assert c_rejections["by_type"] == {"condition_not_met": 1}
     assert b_scores["fp"] == 1 and c_scores["fp"] == 0
     assert b_scores["tp"] == c_scores["tp"] == 1
+
+
+MIXED_SQL = (
+    "def search(cursor, name, mode):\n"
+    "    if mode == 'safe':\n"
+    "        cursor.execute('SELECT * FROM users WHERE name = %s', (name,))\n"
+    "    else:\n"
+    "        cursor.execute(f'SELECT * FROM users WHERE name = {name}')\n"
+)
+MIXED_SHELL = (
+    "import subprocess\n"
+    "\n"
+    "def run(program, args, user_cmd):\n"
+    "    subprocess.run([program, *args], check=True)\n"
+    "    subprocess.run(user_cmd, shell=True)\n"
+)
+
+
+def test_same_function_safe_and_risky_sql_are_judged_separately():
+    safe = evaluate_condition(IssueType.SQL_INJECTION, MIXED_SQL, 3)
+    risky = evaluate_condition(IssueType.SQL_INJECTION, MIXED_SQL, 5)
+    assert safe.status == CONTRADICTED
+    assert safe.line == 3
+    assert risky.status == SUPPORTED
+    assert risky.line == 5
+
+
+def test_same_function_safe_and_risky_subprocess_are_judged_separately():
+    safe = evaluate_condition(IssueType.UNSAFE_COMMAND, MIXED_SHELL, 4)
+    risky = evaluate_condition(IssueType.UNSAFE_COMMAND, MIXED_SHELL, 5)
+    assert safe.status == CONTRADICTED
+    assert safe.line == 4
+    assert risky.status == SUPPORTED
+    assert risky.line == 5
+
+
+def test_verifier_does_not_borrow_evidence_from_another_call_site():
+    """Same file, same function: one finding is right and one must be rejected."""
+    snapshot = PRSnapshot(
+        repo="acme/widgets",
+        pr_number=7,
+        title="mixed sql",
+        base_sha="base",
+        head_sha="head",
+        files=[PRFile(path="app/search.py", status="modified", patch="+x", changes=1)],
+        diff="diff --git a/app/search.py b/app/search.py\n@@ -1,5 +1,5 @@\n"
+        + "".join(f"+{line}\n" for line in MIXED_SQL.splitlines()),
+    )
+    sources = {"app/search.py": MIXED_SQL}
+    lines = MIXED_SQL.splitlines()
+
+    on_risky = make_finding(
+        file_path="app/search.py",
+        start_line=5,
+        end_line=5,
+        evidence=lines[4].strip(),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="f-string interpolation reaches the query.",
+        trigger_condition="name comes from the request",
+    )
+    on_safe = make_finding(
+        file_path="app/search.py",
+        start_line=3,
+        end_line=3,
+        evidence=lines[2].strip(),
+        category="security",
+        issue_type=IssueType.SQL_INJECTION,
+        title="SQL 注入",
+        description="Claimed injection on the parameterized branch.",
+        trigger_condition="name comes from the request",
+    )
+
+    verified, rejected = verify_findings([on_risky, on_safe], snapshot, sources)
+    assert [item.start_line for item in verified] == [5]
+    assert rejected[0]["type"] == "condition_not_met"
+    # The safe claim must not have been saved or sunk by the risky one.
+    assert "parameterized" in rejected[0]["message"] or "bound placeholders" in rejected[0]["message"]
+
+
+def test_guard_after_the_subscript_does_not_dominate():
+    """A bounds check placed after the read cannot protect it."""
+    source = (
+        "def loop(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        print(items[i])\n"
+        "        if i >= len(items):\n"
+        "            break\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == SUPPORTED
+    assert "one past the end" in verdict.reason
+
+
+def test_guard_before_the_subscript_dominates():
+    source = (
+        "def loop(items):\n"
+        "    for i in range(len(items) + 1):\n"
+        "        if i >= len(items):\n"
+        "            break\n"
+        "        print(items[i])\n"
+    )
+    verdict = evaluate_condition(IssueType.BOUNDARY_CONDITION, source, 2)
+    assert verdict.status == CONTRADICTED
+
+
+def test_scoped_single_call_still_matches_a_nearby_reported_line():
+    """A finding on the enclosing statement is still tied to the only call."""
+    case = CASES["sql-injection-05"]
+    verdict = evaluate_condition(IssueType.SQL_INJECTION, case["code"], 1)
+    assert verdict.status == SUPPORTED
+    assert verdict.line == 2
+
+
+def test_far_off_line_is_not_tied_to_an_unrelated_call():
+    case = CASES["sql-injection-05"]
+    verdict = evaluate_condition(IssueType.SQL_INJECTION, case["code"], 40)
+    assert verdict.status == UNKNOWN
+
+
+def test_kwargs_unpacking_does_not_clear_a_shell_claim():
+    """`**opts` may carry shell=True, so the verifier must not refute the claim."""
+    source = "import subprocess\n\ndef run(cmd, **opts):\n    subprocess.run(cmd, **opts)\n"
+    verdict = evaluate_condition(IssueType.UNSAFE_COMMAND, source, 4)
+    assert verdict.status == UNKNOWN
+    assert "keyword-argument unpacking" in verdict.reason
