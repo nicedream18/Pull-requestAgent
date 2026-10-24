@@ -625,7 +625,47 @@ Not proven:
   real data does not;
 * that any of this generalises past 15 fixtures, which have been tuned against five times.
 
-## 17. Next command, pending budget approval
+## 17. Independent candidate benchmark (built, not yet scored)
+
+`evals/datasets/prguard_v2.json` adds 32 cases that can express what v1 could not:
+
+| Property | Count |
+| --- | ---: |
+| cases | 32 |
+| multi-file PRs | 12 |
+| clean PRs (no labelled defect) | 14 |
+| multi-defect PRs | 4 |
+| labelled defects | 23 |
+| `dev` / `test` / `holdout` | 11 / 15 / 6 |
+| **human-reviewed labels** | **0** |
+| labels produced by a model | 0 |
+
+Label status matters more than the count. Every label is `draft`, written by the author of
+the fixture code, and `evals/check_labels.py` verifies only that each one is *internally
+consistent*:
+
+| Check | Result |
+| --- | ---: |
+| cited file exists in the case | 23 / 23 |
+| line range inside the file | 23 / 23 |
+| supporting evidence at the cited line (+/-2) | 23 / 23 |
+| deterministic condition `SUPPORTED` | 20 / 23 |
+| condition `UNKNOWN` (expected, see below) | 3 / 23 |
+| condition **contradicted** | **0 / 23** |
+
+The three `UNKNOWN` cases are deliberate: `mf-cross-02` is a cross-file breakage with no
+deterministic check, `sf-testgap-14` is a test-gap claim, and `tricky-multiline-sql-28`
+builds the query on one line and executes it on the next. A reviewer still has to confirm
+each is really a defect; consistency is not correctness.
+
+Pipeline smoke test on the new set, offline runner, **not a quality result**: all 32 cases
+complete, 16 TP / 0 FP / 7 FN (P 1.000, R 0.696). The regex runner does not cover every
+new shape, which is expected and is why the set is for the model, not for the runner.
+
+**Nothing in this section is a generalisation claim.** See
+`docs/evaluation-protocol.md` for what may be published and when.
+
+## 18. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens

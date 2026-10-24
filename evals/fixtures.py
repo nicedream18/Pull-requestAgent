@@ -12,6 +12,7 @@ from prguard.context import approximate_tokens
 from prguard.models import AgentRun, Finding, FindingType, IssueType, PRFile, PRReviewRequest, PRSnapshot
 
 DATASET = Path(__file__).parent / "datasets" / "prguard_v1.json"
+DATASET_V2 = Path(__file__).parent / "datasets" / "prguard_v2.json"
 
 
 def load_dataset() -> dict:
@@ -21,7 +22,30 @@ def load_dataset() -> dict:
     return data
 
 
+def case_files(case: dict) -> list[dict]:
+    """Uniform view over single-file (v1) and multi-file (v2) cases."""
+    if "files" in case:
+        return list(case["files"])
+    return [{"path": case["file_path"], "code": case["code"]}]
+
+
+def case_defects(case: dict) -> list[dict]:
+    """All labelled defects in a case, in the shape the matcher expects."""
+    if "defects" in case:
+        return list(case["defects"])
+    return [case] if case.get("is_real_defect") else []
+
+
+def case_has_defect(case: dict) -> bool:
+    if "has_defect" in case:
+        return bool(case["has_defect"])
+    return bool(case.get("is_real_defect"))
+
+
 def snapshot_for(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
+    if "files" in case:
+        return _multi_file_snapshot(case)
+
     source = case["code"]
     lines = source.splitlines()
     patch = f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join(f"+{line}" for line in lines)
@@ -36,6 +60,53 @@ def snapshot_for(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
         diff=f"diff -- {case['file_path']} (modified)\n{patch}",
     )
     return snapshot, {case["file_path"]: source}
+
+
+def _multi_file_snapshot(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
+    """Build a snapshot whose diff really contains several files.
+
+    Each file gets its own hunk, so path recovery has a genuine choice between
+    candidates instead of the trivially unique single-file case.
+    """
+    files: list[PRFile] = []
+    sources: dict[str, str] = {}
+    hunks: list[str] = []
+    for entry in case["files"]:
+        source = entry["code"]
+        lines = source.splitlines()
+        status = entry.get("status", "modified")
+        sources[entry["path"]] = source
+        patch = f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join(f"+{line}" for line in lines)
+        files.append(
+            PRFile(
+                path=entry["path"],
+                status=status,
+                patch=None if status == "removed" else patch,
+                changes=len(lines),
+            )
+        )
+        hunks.append(
+            f"diff --git a/{entry['path']} b/{entry['path']}\n"
+            f"--- a/{entry['path']}\n"
+            f"+++ b/{entry['path']}\n"
+            + (patch if status != "removed" else "")
+        )
+    snapshot = PRSnapshot(
+        repo="prguard/fixture",
+        pr_number=int(hashlib.sha256(case["case_id"].encode()).hexdigest()[:8], 16) % 900_000 + 1,
+        title=case.get("pr_title", f"Fixture: {case['case_id']}"),
+        body="Local evaluation fixture.",
+        base_sha="fixture-base",
+        head_sha="fixture-head",
+        files=files,
+        diff="\n".join(hunks),
+    )
+    return snapshot, sources
+
+
+def load_dataset_v2(path: Path | None = None) -> dict:
+    data = json.loads((path or DATASET_V2).read_text(encoding="utf-8"))
+    return data
 
 
 class FixtureClient:

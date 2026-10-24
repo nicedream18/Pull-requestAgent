@@ -1,0 +1,1052 @@
+{
+  "dataset_version": "2.0-candidate",
+  "description": "Independent multi-file candidate benchmark. Labels are drafts written by the author of the code; none is human-reviewed and none was produced by a model. Do not publish generalisation claims from this set until label_review_status becomes human_reviewed for every case.",
+  "label_policy": {
+    "allowed_status": [
+      "draft",
+      "human_reviewed",
+      "indeterminate"
+    ],
+    "current": "all cases are draft",
+    "human_reviewed_count": 0,
+    "llm_generated_labels": false
+  },
+  "stats": {
+    "case_count": 32,
+    "multi_file_cases": 12,
+    "clean_cases": 14,
+    "multi_defect_cases": 4,
+    "labelled_defects": 23,
+    "splits": {
+      "dev": 11,
+      "test": 15,
+      "holdout": 6
+    }
+  },
+  "cases": [
+    {
+      "case_id": "mf-secret-01",
+      "pr_title": "feat: load billing credentials from config",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/config.py",
+          "code": "API_TOKEN = \"sk-live-8f2b41c9de77\"\n\nTIMEOUT = 30\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/billing.py",
+          "code": "from app.config import API_TOKEN\n\n\ndef headers():\n    return {'Authorization': API_TOKEN}\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-secret-01-d1",
+          "issue_type": "hardcoded_secret",
+          "defect_type": "hardcoded_secret",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/config.py",
+          "line_range": [
+            1,
+            1
+          ],
+          "description": "A live-looking API token is committed in app/config.py.",
+          "trigger_condition": "Anyone with repository read access reads app/config.py line 1.",
+          "supporting_evidence": "API_TOKEN = \"sk-live-8f2b41c9de77\"",
+          "expected_behavior": "The token is read from the environment or a secret store.",
+          "actual_behavior": "A live-looking API token is committed in app/config.py.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Second file exists to make a wrong path plausible; the defect is only in config.py."
+    },
+    {
+      "case_id": "mf-cross-02",
+      "pr_title": "refactor: rename Account.balance to Account.amount",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/models.py",
+          "code": "class Account:\n    def __init__(self, amount: int = 0) -> None:\n        self.amount = amount\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/report.py",
+          "code": "from app.models import Account\n\n\ndef total(account: Account) -> int:\n    return account.balance\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-cross-02-d1",
+          "issue_type": "cross_file_breakage",
+          "defect_type": "cross_file_breakage",
+          "category": "bug",
+          "severity": "high",
+          "file_path": "app/report.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "report.total still reads Account.balance after the field was renamed to amount.",
+          "trigger_condition": "Calling total() with any Account instance raises AttributeError.",
+          "supporting_evidence": "return account.balance",
+          "expected_behavior": "report.total reads account.amount, matching the renamed attribute.",
+          "actual_behavior": "report.total still reads Account.balance after the field was renamed to amount.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Cross-file: the breaking change is in models.py but the failing line is in report.py."
+    },
+    {
+      "case_id": "mf-two-defects-03",
+      "pr_title": "feat: add search and upload helpers",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/search.py",
+          "code": "def search(cursor, name):\n    cursor.execute(f\"SELECT * FROM users WHERE name = '{name}'\")\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/uploads.py",
+          "code": "import os\n\n\ndef save(path):\n    os.chmod(path, 0o777)\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/util.py",
+          "code": "def noop():\n    return None\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-two-defects-03-d1",
+          "issue_type": "sql_injection",
+          "defect_type": "sql_injection",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/search.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The name parameter is interpolated into the query string.",
+          "trigger_condition": "A name containing a quote changes the query structure.",
+          "supporting_evidence": "cursor.execute(f\"SELECT * FROM users WHERE name = '{name}'\")",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The name parameter is interpolated into the query string.",
+          "label_review_status": "draft"
+        },
+        {
+          "defect_id": "mf-two-defects-03-d2",
+          "issue_type": "overly_permissive_file_mode",
+          "defect_type": "overly_permissive_file_mode",
+          "category": "security",
+          "severity": "high",
+          "file_path": "app/uploads.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "The uploaded file is made world-writable.",
+          "trigger_condition": "save() is called on any path.",
+          "supporting_evidence": "os.chmod(path, 0o777)",
+          "expected_behavior": "Only the owner should be able to write the file.",
+          "actual_behavior": "The uploaded file is made world-writable.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Two defects in two files, plus a third file with nothing wrong."
+    },
+    {
+      "case_id": "mf-basename-04",
+      "pr_title": "feat: add test settings and app settings",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/settings.py",
+          "code": "TOKEN = \"sk-live-1a2b3c4d5e6f\"\n",
+          "status": "modified"
+        },
+        {
+          "path": "tests/settings.py",
+          "code": "DEBUG = True\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-basename-04-d1",
+          "issue_type": "hardcoded_secret",
+          "defect_type": "hardcoded_secret",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/settings.py",
+          "line_range": [
+            1,
+            1
+          ],
+          "description": "The application settings file embeds a credential.",
+          "trigger_condition": "Reading app/settings.py exposes the token.",
+          "supporting_evidence": "TOKEN = \"sk-live-1a2b3c4d5e6f\"",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The application settings file embeds a credential.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "A basename-only path (settings.py) must be ambiguous here, not resolved to the first match."
+    },
+    {
+      "case_id": "mf-basename-05",
+      "pr_title": "test: move debug flag into test settings",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/settings.py",
+          "code": "DEBUG = False\n",
+          "status": "modified"
+        },
+        {
+          "path": "tests/settings.py",
+          "code": "TOKEN = \"sk-live-9z8y7x6w5v4u\"\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-basename-05-d1",
+          "issue_type": "hardcoded_secret",
+          "defect_type": "hardcoded_secret",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "tests/settings.py",
+          "line_range": [
+            1,
+            1
+          ],
+          "description": "A credential is committed in the test settings module.",
+          "trigger_condition": "Reading tests/settings.py exposes the token.",
+          "supporting_evidence": "TOKEN = \"sk-live-9z8y7x6w5v4u\"",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "A credential is committed in the test settings module.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Mirror of 04: the duplicate basename that matters is the test one."
+    },
+    {
+      "case_id": "mf-clean-06",
+      "pr_title": "refactor: split formatting helpers",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/format.py",
+          "code": "def display_name(first, last):\n    return f\"{first.strip()} {last.strip()}\"\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/strings.py",
+          "code": "def repeat(text, times):\n    return text * times\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/numbers.py",
+          "code": "def clamp(value, low, high):\n    return min(max(value, low), high)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Nothing is wrong; any finding here is a false positive."
+    },
+    {
+      "case_id": "mf-clean-07",
+      "pr_title": "docs: document the review CLI",
+      "split": "dev",
+      "files": [
+        {
+          "path": "docs/usage.md",
+          "code": "# Usage\n\nRun `prguard review --repo owner/repo --pr 12`.\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Documentation-only change."
+    },
+    {
+      "case_id": "mf-similar-08",
+      "pr_title": "feat: add two readers",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/reader_a.py",
+          "code": "def read_a(handle):\n    return handle.read()\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/reader_b.py",
+          "code": "def read_b(handle):\n    return handle.read()\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/open_a.py",
+          "code": "def open_a(path):\n    handle = open(path)\n    return handle.read()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-similar-08-d1",
+          "issue_type": "resource_leak",
+          "defect_type": "resource_leak",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/open_a.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The handle opened in open_a is never closed.",
+          "trigger_condition": "open_a() returns and the file object is garbage collected.",
+          "supporting_evidence": "handle = open(path)",
+          "expected_behavior": "Use a with-block so the handle closes on every path.",
+          "actual_behavior": "The handle opened in open_a is never closed.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "`handle.read()` appears in three files; only open_a actually opens a handle."
+    },
+    {
+      "case_id": "mf-three-defects-09",
+      "pr_title": "feat: batch import pipeline",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/import_a.py",
+          "code": "def parse(text):\n    import json\n    return json.loads(text)\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/import_b.py",
+          "code": "def ratio(total, count):\n    return total / count\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/import_c.py",
+          "code": "def last(items):\n    for i in range(len(items) + 1):\n        print(items[i])\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-three-defects-09-d1",
+          "issue_type": "missing_exception_handling",
+          "defect_type": "missing_exception_handling",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/import_a.py",
+          "line_range": [
+            3,
+            3
+          ],
+          "description": "json.loads raises on malformed input and nothing handles it.",
+          "trigger_condition": "parse() receives invalid JSON.",
+          "supporting_evidence": "return json.loads(text)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "json.loads raises on malformed input and nothing handles it.",
+          "label_review_status": "draft"
+        },
+        {
+          "defect_id": "mf-three-defects-09-d2",
+          "issue_type": "division_by_zero",
+          "defect_type": "division_by_zero",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/import_b.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "count is used as a divisor with no zero guard.",
+          "trigger_condition": "ratio() is called with count == 0.",
+          "supporting_evidence": "return total / count",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "count is used as a divisor with no zero guard.",
+          "label_review_status": "draft"
+        },
+        {
+          "defect_id": "mf-three-defects-09-d3",
+          "issue_type": "boundary_condition",
+          "defect_type": "boundary_condition",
+          "category": "bug",
+          "severity": "high",
+          "file_path": "app/import_c.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "range(len(items) + 1) indexes one past the end.",
+          "trigger_condition": "last() is called with any list; the final iteration raises IndexError.",
+          "supporting_evidence": "for i in range(len(items) + 1):",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "range(len(items) + 1) indexes one past the end.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Three independent defects; a single-defect metric would understate recall."
+    },
+    {
+      "case_id": "mf-same-line-10",
+      "pr_title": "feat: persist upload metadata",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/persist.py",
+          "code": "import os\n\n\ndef persist(path):\n    os.chmod(path, 0o777); TOKEN = \"sk-live-77aa88bb99cc\"\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "mf-same-line-10-d1",
+          "issue_type": "overly_permissive_file_mode",
+          "defect_type": "overly_permissive_file_mode",
+          "category": "security",
+          "severity": "high",
+          "file_path": "app/persist.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "The file is made world-writable.",
+          "trigger_condition": "persist() is called on any path.",
+          "supporting_evidence": "os.chmod(path, 0o777)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The file is made world-writable.",
+          "label_review_status": "draft"
+        },
+        {
+          "defect_id": "mf-same-line-10-d2",
+          "issue_type": "hardcoded_secret",
+          "defect_type": "hardcoded_secret",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/persist.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "A credential literal is assigned on the same line.",
+          "trigger_condition": "Reading app/persist.py exposes the token.",
+          "supporting_evidence": "TOKEN = \"sk-live-77aa88bb99cc\"",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "A credential literal is assigned on the same line.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Two distinct defects on one physical line; dedup must not merge them."
+    },
+    {
+      "case_id": "mf-deleted-11",
+      "pr_title": "chore: drop the legacy exporter",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/exporter.py",
+          "code": "def export(path):\n    return open(path).read()\n",
+          "status": "removed"
+        },
+        {
+          "path": "app/new_export.py",
+          "code": "def export(path):\n    with open(path) as handle:\n        return handle.read()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Removed file plus a correct replacement; a finding on the removed path is wrong."
+    },
+    {
+      "case_id": "sf-null-12",
+      "pr_title": "feat: add display_name",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/profile.py",
+          "code": "from typing import Optional\n\n\ndef display_name(user: Optional[object]) -> str:\n    return user.name\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "sf-null-12-d1",
+          "issue_type": "null_dereference",
+          "defect_type": "null_dereference",
+          "category": "bug",
+          "severity": "high",
+          "file_path": "app/profile.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "The Optional user is dereferenced without a None check.",
+          "trigger_condition": "display_name(None) is called, which the annotation permits.",
+          "supporting_evidence": "return user.name",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The Optional user is dereferenced without a None check.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "sf-leak-13",
+      "pr_title": "feat: add export helper",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/export.py",
+          "code": "def export(path):\n    handle = open(path)\n    return handle.read()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "sf-leak-13-d1",
+          "issue_type": "resource_leak",
+          "defect_type": "resource_leak",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/export.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The file handle is never closed.",
+          "trigger_condition": "export() returns or raises before closing.",
+          "supporting_evidence": "handle = open(path)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The file handle is never closed.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "sf-testgap-14",
+      "pr_title": "feat: transfer funds between accounts",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/transfers.py",
+          "code": "def transfer_funds(source, target, amount):\n    if amount <= 0:\n        raise ValueError('amount must be positive')\n    source.debit(amount)\n    target.credit(amount)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "sf-testgap-14-d1",
+          "issue_type": "missing_test_coverage",
+          "defect_type": "missing_test_coverage",
+          "category": "testing",
+          "severity": "medium",
+          "file_path": "app/transfers.py",
+          "line_range": [
+            4,
+            5
+          ],
+          "description": "The debit/credit pair has no test for a partial failure.",
+          "trigger_condition": "credit() fails after debit() succeeded.",
+          "supporting_evidence": "target.credit(amount)",
+          "expected_behavior": "A test covers the credit-failure path and any rollback.",
+          "actual_behavior": "The debit/credit pair has no test for a partial failure.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "A diff cannot prove the absence of a test; expect UNKNOWN unless a test file is supplied."
+    },
+    {
+      "case_id": "safe-param-sql-15",
+      "pr_title": "fix: parameterize the user lookup",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/search.py",
+          "code": "def search(cursor, name):\n    cursor.execute('SELECT * FROM users WHERE name = %s', (name,))\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Parameterized query; any sql_injection finding is a false positive."
+    },
+    {
+      "case_id": "safe-subprocess-16",
+      "pr_title": "fix: run the tool without a shell",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/runner.py",
+          "code": "import subprocess\n\n\ndef run(program, args):\n    return subprocess.run([program, *args], check=True, capture_output=True)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "disputed",
+      "label_notes": "Argument vector, no shell. A missing_exception_handling claim on line 5 is arguable; see the arbitration report."
+    },
+    {
+      "case_id": "safe-with-open-17",
+      "pr_title": "refactor: use a context manager",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/read.py",
+          "code": "def read(path):\n    with open(path) as handle:\n        return handle.read()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "safe-guard-18",
+      "pr_title": "fix: guard the Optional user",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/profile.py",
+          "code": "from typing import Optional\n\n\ndef display_name(user: Optional[object]) -> str:\n    if user is None:\n        return ''\n    return user.name\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "safe-env-secret-19",
+      "pr_title": "fix: read the token from the environment",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/config.py",
+          "code": "import os\n\nAPI_TOKEN = os.getenv('API_TOKEN')\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Secret-named variable, but it is loaded from the environment."
+    },
+    {
+      "case_id": "tricky-constant-sql-20",
+      "pr_title": "feat: count all users",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/count.py",
+          "code": "def count(cursor):\n    cursor.execute('SELECT COUNT(*) FROM users')\n    return cursor.fetchone()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "A query call with no interpolation point; an injection claim must be refuted."
+    },
+    {
+      "case_id": "tricky-mixed-sql-21",
+      "pr_title": "feat: add safe and unsafe lookups",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/search.py",
+          "code": "def search(cursor, name, mode):\n    if mode == 'safe':\n        cursor.execute('SELECT * FROM users WHERE name = %s', (name,))\n    else:\n        cursor.execute(f'SELECT * FROM users WHERE name = {name}')\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-mixed-sql-21-d1",
+          "issue_type": "sql_injection",
+          "defect_type": "sql_injection",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/search.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "The else branch interpolates name into the query.",
+          "trigger_condition": "mode is anything other than 'safe'.",
+          "supporting_evidence": "cursor.execute(f'SELECT * FROM users WHERE name = {name}')",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The else branch interpolates name into the query.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "One function holds a safe and an unsafe call. A finding on line 3 is wrong; on line 5 is right."
+    },
+    {
+      "case_id": "tricky-guard-not-dominating-22",
+      "pr_title": "feat: print the last item",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/batch.py",
+          "code": "def last(items):\n    for i in range(len(items) + 1):\n        print(items[i])\n        if i >= len(items):\n            break\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-guard-not-dominating-22-d1",
+          "issue_type": "boundary_condition",
+          "defect_type": "boundary_condition",
+          "category": "bug",
+          "severity": "high",
+          "file_path": "app/batch.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The bounds check runs after the read, so it cannot prevent the IndexError.",
+          "trigger_condition": "last() is called with any list; the final iteration reads items[len(items)] first.",
+          "supporting_evidence": "for i in range(len(items) + 1):",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The bounds check runs after the read, so it cannot prevent the IndexError.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "The guard exists but does not dominate the read."
+    },
+    {
+      "case_id": "tricky-guard-dominating-23",
+      "pr_title": "feat: print the last item safely",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/batch.py",
+          "code": "def last(items):\n    for i in range(len(items) + 1):\n        if i >= len(items):\n            break\n        print(items[i])\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Mirror of 22 with the guard before the read; a boundary claim must be refuted."
+    },
+    {
+      "case_id": "tricky-evidence-no-defect-24",
+      "pr_title": "feat: document the injection risk",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/notes.py",
+          "code": "SQL_INJECTION_NOTE = 'do not interpolate user input into a query'\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "The words appear in a constant; text matching must not become proof."
+    },
+    {
+      "case_id": "tricky-rename-both-sides-25",
+      "pr_title": "refactor: rename User.name to User.full_name",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/models.py",
+          "code": "class User:\n    def __init__(self, full_name: str) -> None:\n        self.full_name = full_name\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/views.py",
+          "code": "def label(user):\n    return user.full_name\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "Both sides renamed; a cross_file_breakage claim here is a false positive."
+    },
+    {
+      "case_id": "tricky-two-agents-one-defect-26",
+      "pr_title": "feat: add chmod helper",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/uploads.py",
+          "code": "import os\n\n\ndef save(path):\n    os.chmod(path, 0o777)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-two-agents-one-defect-26-d1",
+          "issue_type": "overly_permissive_file_mode",
+          "defect_type": "overly_permissive_file_mode",
+          "category": "security",
+          "severity": "high",
+          "file_path": "app/uploads.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "save() makes the file writable by everyone.",
+          "trigger_condition": "save() is called on any path.",
+          "supporting_evidence": "os.chmod(path, 0o777)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "save() makes the file writable by everyone.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Two agents will report this with different wording; it must count once."
+    },
+    {
+      "case_id": "tricky-adjacent-same-type-27",
+      "pr_title": "feat: write two files",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/writer.py",
+          "code": "import os\n\n\ndef write_a(path):\n    os.chmod(path, 0o777)\n\n\ndef write_b(path):\n    os.chmod(path, 0o777)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-adjacent-same-type-27-d1",
+          "issue_type": "overly_permissive_file_mode",
+          "defect_type": "overly_permissive_file_mode",
+          "category": "security",
+          "severity": "high",
+          "file_path": "app/writer.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "write_a makes the file world-writable.",
+          "trigger_condition": "write_a() is called on any path.",
+          "supporting_evidence": "os.chmod(path, 0o777)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "write_a makes the file world-writable.",
+          "label_review_status": "draft"
+        },
+        {
+          "defect_id": "tricky-adjacent-same-type-27-d2",
+          "issue_type": "overly_permissive_file_mode",
+          "defect_type": "overly_permissive_file_mode",
+          "category": "security",
+          "severity": "high",
+          "file_path": "app/writer.py",
+          "line_range": [
+            9,
+            9
+          ],
+          "description": "write_b makes the file world-writable.",
+          "trigger_condition": "write_b() is called on any path.",
+          "supporting_evidence": "os.chmod(path, 0o777)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "write_b makes the file world-writable.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Identical evidence, same type, four lines apart: two real defects that must NOT be merged."
+    },
+    {
+      "case_id": "tricky-multiline-sql-28",
+      "pr_title": "feat: build a filtered query",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/report.py",
+          "code": "def report(cursor, table):\n    query = 'SELECT * FROM ' + table\n    cursor.execute(query)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-multiline-sql-28-d1",
+          "issue_type": "sql_injection",
+          "defect_type": "sql_injection",
+          "category": "security",
+          "severity": "critical",
+          "file_path": "app/report.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "table is concatenated into the query string.",
+          "trigger_condition": "table comes from user input.",
+          "supporting_evidence": "query = 'SELECT * FROM ' + table",
+          "expected_behavior": "Validate the table against an allow-list; identifiers cannot be bound.",
+          "actual_behavior": "table is concatenated into the query string.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "disputed",
+      "label_notes": "Interprocedural: the sink is on line 3 but the concatenation is on line 2. Layer 2 may answer UNKNOWN."
+    },
+    {
+      "case_id": "tricky-late-import-29",
+      "pr_title": "feat: parse queued payloads",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/queue.py",
+          "code": "def parse(text):\n    import json\n    return json.loads(text)\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-late-import-29-d1",
+          "issue_type": "missing_exception_handling",
+          "defect_type": "missing_exception_handling",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/queue.py",
+          "line_range": [
+            3,
+            3
+          ],
+          "description": "json.loads raises ValueError on malformed input and nothing handles it.",
+          "trigger_condition": "parse() receives a non-JSON payload.",
+          "supporting_evidence": "return json.loads(text)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "json.loads raises ValueError on malformed input and nothing handles it.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "tricky-docstring-only-30",
+      "pr_title": "docs: expand the module docstring",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/module.py",
+          "code": "\"\"\"Helpers for the review pipeline.\n\nNo behaviour change.\"\"\"\n\nVERSION = \"1.2\"\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": ""
+    },
+    {
+      "case_id": "tricky-deleted-target-31",
+      "pr_title": "chore: remove an unused helper",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/old.py",
+          "code": "def old_helper():\n    return 1\n",
+          "status": "removed"
+        },
+        {
+          "path": "app/current.py",
+          "code": "def current_helper():\n    return 2\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "A finding citing app/old.py must not be recovered onto app/current.py."
+    },
+    {
+      "case_id": "tricky-windows-path-32",
+      "pr_title": "feat: add an export path helper",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/paths.py",
+          "code": "def export_path(root):\n    return root + '/out.csv'\n",
+          "status": "modified"
+        },
+        {
+          "path": "app/export.py",
+          "code": "def export(root):\n    handle = open(root + '/out.csv')\n    return handle.read()\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "tricky-windows-path-32-d1",
+          "issue_type": "resource_leak",
+          "defect_type": "resource_leak",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/export.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The handle opened in export is never closed.",
+          "trigger_condition": "export() returns before closing.",
+          "supporting_evidence": "handle = open(root + '/out.csv')",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The handle opened in export is never closed.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Two files with similar names; a Windows-style prediction (app\\\\export.py) must normalize here."
+    }
+  ]
+}

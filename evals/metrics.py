@@ -21,6 +21,34 @@ from collections import defaultdict
 
 from prguard.models import Finding, FindingType
 
+# Cases may carry one labelled defect (v1 schema) or several (v2 schema). Both are
+# read through these helpers so the scoring code has a single shape to reason about.
+
+
+def case_defects(case: dict) -> list[dict]:
+    if "defects" in case:
+        return list(case["defects"])
+    return [case] if case.get("is_real_defect") else []
+
+
+def case_sources(case: dict) -> dict[str, str]:
+    """File contents for a case, whichever schema it uses.
+
+    A synthetic case may carry neither `files` nor `code`; that is fine, the evidence
+    check simply cannot run and the matcher falls back to its other signals.
+    """
+    if "files" in case:
+        return {entry["path"]: entry["code"] for entry in case["files"]}
+    if "file_path" in case and "code" in case:
+        return {case["file_path"]: case["code"]}
+    return {}
+
+
+def case_has_defect(case: dict) -> bool:
+    if "has_defect" in case:
+        return bool(case["has_defect"])
+    return bool(case.get("is_real_defect"))
+
 EVALUATOR_VERSION = "prguard-eval-v2"
 
 # A located finding may be off by this many lines from the labelled range. The
@@ -153,7 +181,7 @@ def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]]
         predicted = predicted_by_case.get(case["case_id"], [])
         defects, advisories = _split(predicted)
         counted = defects + advisories if include_advisories else defects
-        truths = [case] if case["is_real_defect"] else []
+        truths = case_defects(case)
         options = []
         for prediction_index, finding in enumerate(counted):
             for truth_index, truth in enumerate(truths):
@@ -167,10 +195,13 @@ def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]]
         true_positive += tp
         false_positive += fp
         false_negative += fn
-        if case["is_real_defect"]:
-            metric = per_category[case["defect_type"]]
-            metric["tp"] += tp
-            metric["fn"] += fn
+        if case_has_defect(case):
+            for truth in truths:
+                metric = per_category[truth["defect_type"]]
+                metric["fn"] += 1
+            for prediction_index in used_predictions:
+                metric = per_category[counted[prediction_index].issue_type.value]
+                metric["tp"] += 1
         else:
             no_defect_findings += len(counted)
 
@@ -188,7 +219,8 @@ def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]]
             name: values["tp"] / (values["tp"] + values["fn"]) if values["tp"] + values["fn"] else 0.0
             for name, values in sorted(per_category.items())
         },
-        "false_positives_per_no_defect_pr": no_defect_findings / max(1, sum(not case["is_real_defect"] for case in cases)),
+        "false_positives_per_no_defect_pr": no_defect_findings
+        / max(1, sum(not case_has_defect(case) for case in cases)),
     }
 
 
@@ -208,12 +240,16 @@ def _unified_score(
     channels = {"structured": 0, "text": 0}
     per_category: dict[str, dict[str, int]] = defaultdict(lambda: {"tp": 0, "fn": 0})
     no_defect_findings = 0
-    no_defect_cases = max(1, sum(not case["is_real_defect"] for case in cases))
+    no_defect_cases = max(1, sum(not case_has_defect(case) for case in cases))
     for case in cases:
         predicted = predicted_by_case.get(case["case_id"], [])
         defects, advisories = _split(predicted)
         candidates = defects
-        truths = [case] if case["is_real_defect"] else []
+        sources = case_sources(case)
+        truths = [
+            {**truth, "code": sources.get(truth["file_path"], truth.get("code", ""))}
+            for truth in case_defects(case)
+        ]
         options = []
         channel_by_pair: dict[tuple[int, int], str] = {}
         for prediction_index, finding in enumerate(candidates):
@@ -237,10 +273,13 @@ def _unified_score(
         true_positive += tp
         false_positive += fp
         false_negative += fn
-        if case["is_real_defect"]:
-            metric = per_category[case["defect_type"]]
-            metric["tp"] += tp
-            metric["fn"] += fn
+        if case_has_defect(case):
+            for truth in truths:
+                metric = per_category[truth["defect_type"]]
+                metric["fn"] += 1
+            for prediction_index in used_predictions:
+                metric = per_category[candidates[prediction_index].issue_type.value]
+                metric["tp"] += 1
         else:
             no_defect_findings += len(candidates) + (len(advisories) if count_advisories_as_fp else 0)
 
@@ -303,7 +342,8 @@ def evaluate_cases(
         review_total += sum(1 for item in predicted if item.needs_human_review)
         details.append({
             "case_id": case["case_id"],
-            "is_real_defect": case["is_real_defect"],
+            "is_real_defect": case_has_defect(case),
+            "labelled_defects": len(case_defects(case)),
             "defect_count": len(defects),
             "advisory_count": len(advisories),
             "findings": [item.model_dump(mode="json") for item in predicted],
@@ -353,7 +393,7 @@ def _agent_stats(results: list[dict], cases: list[dict]) -> dict[str, dict[str, 
                 if not agent:
                     continue
                 accepted[agent] += 1
-                if case.get("is_real_defect") and strict_match(finding, case) is not None:
+                if any(strict_match(finding, truth) is not None for truth in case_defects(case)):
                     valid[agent] += 1
         for error in item.get("rejected", []):
             agent = str(error.get("source_agent", "")) or "unknown"
@@ -417,7 +457,8 @@ def aggregate_performance(results: list[dict], cases: list[dict], *, matcher: st
     input_rate = _price("PRGUARD_INPUT_PRICE_PER_1M")
     output_rate = _price("PRGUARD_OUTPUT_PRICE_PER_1M")
     estimated_cost = (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000 if input_rate is not None and output_rate is not None else None
-    defect_cases = sum(1 for case in cases if case["is_real_defect"])
+    defect_cases = sum(1 for case in cases if case_has_defect(case))
+    labelled_defects = sum(len(case_defects(case)) for case in cases)
     pre = _pre_verifier_scores(results, cases, matcher)
     return {
         **pre,
@@ -441,6 +482,7 @@ def aggregate_performance(results: list[dict], cases: list[dict], *, matcher: st
         "rejection_types": dict(sorted(rejection_types.items())),
         "agent_stats": _agent_stats(results, cases),
         "defect_cases": defect_cases,
+        "labelled_defects": labelled_defects,
         "runs": len(results),
         "finding_count": len(all_predictions),
     }

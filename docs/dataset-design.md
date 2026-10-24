@@ -5,9 +5,28 @@ this branch. It can no longer serve as evidence of generalisation: rules were ad
 against it repeatedly, and each fixture carries exactly one label, so a second correct
 observation is always charged as a false positive.
 
-This document specifies a **candidate** set. It contains no labels yet. Labels must be
-written by a human reviewer and frozen before any run, and the set must not be used to
-tune the pipeline afterwards.
+This document specifies the candidate set. Part of it is now implemented (§0): 32 cases
+with author-written draft labels. Labels must still be reviewed by a second person and
+frozen before any run whose result is published, and the set must not be used to tune the
+pipeline afterwards.
+
+## 0. Current implementation status (updated 2026-10-24)
+
+`evals/datasets/prguard_v2.json` now exists: **32 cases**, 12 multi-file, 14 clean,
+4 multi-defect, 23 labelled defects, splits 11 dev / 15 test / 6 holdout. It is built by
+`evals/datasets/build_prguard_v2.py` and checked by `evals/check_labels.py`.
+
+| Property | Status |
+| --- | --- |
+| Code written | yes, 32 cases |
+| Labels written | yes, as `draft` |
+| Labels human-reviewed | **0 of 32** |
+| Labels produced by a model | no |
+| Used for tuning | no |
+| Used for a published claim | no |
+
+The target in section 2 is 50 cases; 32 exist. The 18 missing cases are listed in
+section 8 as the next batch.
 
 ## 1. Status
 
@@ -128,3 +147,22 @@ without the step above.
 
 The current set supports none of these, which is the strongest argument for building this
 one before claiming generalisation.
+
+## 8. Remaining cases for the 50-case target
+
+The current 32 cases cover every property in section 2 at least once, except the two
+marked below. To reach 50, add:
+
+| Batch | Count | Content |
+| --- | ---: | --- |
+| multi-file, one defect among 5 files | 4 | tests that recovery ignores distant files |
+| two defects in the same file, different functions | 4 | dedup must not merge across functions |
+| clean multi-file refactor with a renamed file | 3 | rename handling and false-positive pressure |
+| wrong line number but right file and evidence | 3 | line tolerance boundary, +/-3 and +/-10 |
+| binary or unreadable file in the diff | 2 | layer 1 must reject without crashing |
+| cross-file breakage where the caller is unchanged | 2 | `cross_file_breakage` has no deterministic check yet |
+| total | 18 | |
+
+The `cross_file_breakage` cases will keep returning `UNKNOWN` from layer 2 until a check
+exists. That is deliberate: they measure how often a real cross-file defect is reported
+with a correct location, not whether the verifier can prove it.

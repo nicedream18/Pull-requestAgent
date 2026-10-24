@@ -125,12 +125,20 @@ def _evidence_line(source: str, evidence: str) -> int | None:
 class PathResolver:
     """Resolve a reported path against the PR's trusted file set."""
 
-    def __init__(self, changed_files: list[str], sources: dict[str, str]):
+    def __init__(
+        self,
+        changed_files: list[str],
+        sources: dict[str, str],
+        renames: dict[str, str] | None = None,
+    ):
         # Only PR files are trusted. Retrieved context files are deliberately excluded:
         # a finding about unchanged code is still a finding about this PR, but a path
         # guessed from a neighbouring file is not evidence.
         self.candidates: tuple[str, ...] = tuple(changed_files)
         self.sources = {path: sources.get(path, "") for path in self.candidates}
+        # A rename means the model may legitimately cite the old name. Map it forward
+        # rather than treating it as a wrong path.
+        self.renames = {normalize_path(old): new for old, new in (renames or {}).items()}
         self.by_basename: dict[str, list[str]] = {}
         for path in self.candidates:
             self.by_basename.setdefault(posixpath.basename(path), []).append(path)
@@ -143,6 +151,12 @@ class PathResolver:
             status = EXACT if original == normalized else NORMALIZED
             basis = "path matches a changed file" if status == EXACT else f"normalized to {normalized}"
             return PathResolution(status, original, normalized, basis)
+
+        renamed = self.renames.get(normalized)
+        if renamed in self.candidates:
+            return PathResolution(
+                NORMALIZED, original, renamed, f"{normalized} was renamed to {renamed} in this PR"
+            )
 
         # A specific but non-existent path is not repaired by name similarity. It may
         # still be recoverable from evidence, which is checked below and labelled.

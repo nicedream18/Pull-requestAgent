@@ -238,7 +238,13 @@ def verify_findings(
     valid_paths = {file.path for file in snapshot.files} | (related_paths or set())
     touched = changed_lines(snapshot)
     resolver = (
-        PathResolver([file.path for file in snapshot.files], source_map) if resolve_paths else None
+        PathResolver(
+            [file.path for file in snapshot.files],
+            source_map,
+            {file.previous_filename: file.path for file in snapshot.files if file.previous_filename},
+        )
+        if resolve_paths
+        else None
     )
     accepted: list[Finding] = []
     rejected: list[dict[str, str]] = []

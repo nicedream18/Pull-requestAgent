@@ -147,6 +147,26 @@ PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
 `--mode offline` exercises the harness with the deterministic runner; it validates the
 plumbing only and says nothing about prompt quality.
 
+## Independent candidate benchmark
+
+`evals/datasets/prguard_v2.json` is a 32-case set built to test what the 15 development
+fixtures cannot: 12 multi-file PRs, 14 clean PRs, 4 PRs with several defects, and 23
+labelled defects across three splits (11 dev / 15 test / 6 holdout).
+
+**No label in it is human-reviewed, and none was produced by a model.** All are `draft`,
+written alongside the fixture code. `evals/check_labels.py` verifies internal consistency
+only: cited file exists, line range valid, evidence present at the cited line, and the
+deterministic check does not contradict the label (23/23 consistent, 0 contradictions, 3
+`UNKNOWN` by design). Publishing a generalisation claim from this set requires a second
+reviewer first; `check_labels --require-reviewed` refuses to run while drafts remain.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.check_labels
+python evals/datasets/build_prguard_v2.py     # rebuild from the generator
+```
+
+See [dataset-design](docs/dataset-design.md) and [evaluation-protocol](docs/evaluation-protocol.md).
+
 ## Measured results
 
 | Record | Scope | Result |

@@ -28,6 +28,8 @@ from evals.metrics import EVALUATOR_VERSION, evaluate_cases, strict_match
 from prguard.models import Finding, FindingType
 from prguard.verifier import verify_findings
 
+FROZEN = Path(__file__).parent / "frozen" / "online_20261024T102247Z.json"
+
 CONFIGS = [
     ("A", "layer 1 only", {"resolve_paths": False, "dedupe": False, "check_conditions": False}),
     ("B", "+ path recovery", {"resolve_paths": True, "dedupe": False, "check_conditions": False}),
@@ -38,7 +40,7 @@ CONFIGS = [
 
 def load_frozen(path: Path) -> tuple[dict, list[dict]]:
     document = json.loads(path.read_text(encoding="utf-8"))
-    dataset_path = Path(document.get("dataset", "evals/datasets/prguard_v1.json"))
+    dataset_path = Path(document.get("dataset") or "evals/datasets/prguard_v1.json")
     if not dataset_path.exists():
         dataset_path = Path("evals/datasets/prguard_v1.json")
     cases = json.loads(dataset_path.read_text(encoding="utf-8"))["cases"]
@@ -104,7 +106,12 @@ def per_case_table(cases: list[dict], by_case: dict[str, list[Finding]]) -> list
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Replay frozen findings through path/dedup ablations.")
-    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=FROZEN,
+        help="Frozen run to replay. Defaults to the committed fixture so CI never skips.",
+    )
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals/path-ablation"))
     args = parser.parse_args(argv)
 
