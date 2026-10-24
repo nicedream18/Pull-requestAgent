@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import os
 import sys
 import warnings
 
@@ -12,28 +13,30 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 # Replace with inputs you want to test with, it will automatically
 # interpolate any tasks and agents information
 
+
+def _review_inputs() -> dict[str, str]:
+    repo_name = os.getenv("REVIEW_REPO")
+    pr_patch_url = os.getenv("REVIEW_PR_PATCH_URL")
+    if not repo_name or not pr_patch_url:
+        raise RuntimeError(
+            "Set REVIEW_REPO and REVIEW_PR_PATCH_URL for the retained upstream template entry point; "
+            "use `prguard review --repo owner/repo --pr 123` for the PRGuard CLI."
+        )
+    return {"pr_patch_url": pr_patch_url, "repo_name": repo_name, "files_changed": ""}
+
 def run():
     """
     Run the crew.
     """
-    inputs = {
-        'pr_patch_url': 'https://github.com/crewAIInc/crewAI/pull/1927.patch',
-        'repo_name': 'crewAIInc/crewAI',
-        'files_changed': ''
-    }
-    CodeReviewCrewForGithubPullRequestCrew().crew().kickoff(inputs=inputs)
+    CodeReviewCrewForGithubPullRequestCrew().crew().kickoff(inputs=_review_inputs())
 
 
 def train():
     """
     Train the crew for a given number of iterations.
     """
-    inputs = {
-        'pr_patch_url': 'sample_value',
-        'repo_name': 'crewAIInc/crewAI'
-    }
     try:
-        CodeReviewCrewForGithubPullRequestCrew().crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=inputs)
+        CodeReviewCrewForGithubPullRequestCrew().crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=_review_inputs())
 
     except Exception as e:
         raise Exception(f"An error occurred while training the crew: {e}")
@@ -52,11 +55,13 @@ def test():
     """
     Test the crew execution and returns the results.
     """
-    inputs = {
-        'pr_patch_url': 'sample_value'
-    }
     try:
-        CodeReviewCrewForGithubPullRequestCrew().crew().test(n_iterations=int(sys.argv[1]), openai_model_name=sys.argv[2], inputs=inputs)
+        model_name = (
+            sys.argv[2]
+            if len(sys.argv) > 2
+            else os.getenv("DEEPSEEK_MODEL", "deepseek/deepseek-chat")
+        )
+        CodeReviewCrewForGithubPullRequestCrew().crew().test(n_iterations=int(sys.argv[1]), openai_model_name=model_name, inputs=_review_inputs())
 
     except Exception as e:
         raise Exception(f"An error occurred while testing the crew: {e}")

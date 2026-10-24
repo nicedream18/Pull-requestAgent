@@ -1,18 +1,24 @@
 [project]
-name = "code_review_crew_for_github_pull_request"
+name = "prguard"
 version = "0.1.0"
-description = "code_review_crew_for_github_pull_request using crewAI"
+description = "PRGuard multi-agent intelligent code review system built on CrewAI"
 authors = [{ name = "Your Name", email = "you@example.com" }]
 requires-python = ">=3.10,<=3.13"
 dependencies = [
     "crewai[tools]==0.98.0",
     "pygithub>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pytest>=8.0.0",
 ]
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [project.scripts]
+prguard = "prguard.cli:main"
+prguard-eval = "evals.run:main"
 code_review_crew_for_github_pull_request = "code_review_crew_for_github_pull_request.main:run"
 run_crew = "code_review_crew_for_github_pull_request.main:run"
 train = "code_review_crew_for_github_pull_request.main:train"
@@ -22,3 +28,10 @@ test = "code_review_crew_for_github_pull_request.main:test"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prguard", "src/code_review_crew_for_github_pull_request", "evals"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

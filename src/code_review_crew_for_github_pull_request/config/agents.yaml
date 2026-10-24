@@ -6,7 +6,7 @@ quick_review_assistant:
   backstory: As a fast and efficient code analyzer, you specialize in quick preliminary
     reviews to identify common patterns and potential concerns, helping to streamline
     the overall review process.
-  llm: anthropic/claude-3-5-sonnet-latest
+  llm: deepseek/deepseek-chat
   verbose: false
 
 code_review_expert:
@@ -16,5 +16,5 @@ code_review_expert:
   backstory: As a Code Review Specialist with extensive experience in software development
     and quality assurance, you excel at identifying potential issues in code and providing
     constructive feedback to enhance the overall quality of the project.
-  llm: anthropic/claude-3-5-sonnet-latest
+  llm: deepseek/deepseek-chat
   verbose: false

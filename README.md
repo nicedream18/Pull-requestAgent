@@ -1,65 +1,127 @@
-# Code Review Crew for GitHub Pull Request
+# PRGuard - Multi-Agent Intelligent Code Review System
 
-Welcome to the CodeReviewCrewForGithubPullRequest project, powered by [crewAI](https://crewai.com). This project sets up a multi-agent AI system designed to perform comprehensive code reviews for GitHub pull requests.
+PRGuard is a reproducible GitHub pull request review system built with CrewAI Flows and small specialist Crews. It fetches a PR read-only, classifies risk with deterministic rules, retrieves relevant Python context, runs only the necessary agents, verifies findings against source evidence, and writes JSON, Markdown, and execution trace reports.
 
-## Project Overview
+The project began from the CrewAI GitHub pull request review template already present in this repository. The original package remains under `src/code_review_crew_for_github_pull_request/`; PRGuard is the independently implemented package under `src/prguard/`. See [architecture-baseline](docs/architecture-baseline.md) and [contributions](docs/contributions.md) for provenance and the exact change boundary.
 
-This crew consists of two main agents:
+## Architecture
 
-1. **Quick Review Assistant**: Provides rapid initial assessments of code changes and identifies basic patterns and potential issues in pull requests.
-2. **Code Review Expert**: Analyzes code changes in detail and provides comprehensive review reports highlighting code quality issues and suggestions for improvements.
-
-## Key Features
-
-- Automated code analysis for GitHub Pull Requests
-- Identification of related files and potential impacts
-- Analysis of historically related Pull Requests
-- Generation of detailed, markdown-formatted code review comments
-
-## Installation
-
-Ensure you have Python >=3.10 <=3.13 installed. This project uses [UV](https://docs.astral.sh/uv/) for dependency management.
-Follow the [installation guide for CrewAI](https://docs.crewai.com/docs/installation).
-
-Next, navigate to your project directory and install the dependencies:
-
-(Optional) Lock the dependencies and install them by using the CLI command:
-```bash
-crewai install
+```mermaid
+flowchart LR
+    A[GitHub PR] --> B[Read-only fetch]
+    B --> C[Risk + context]
+    C --> D{CrewAI Flow router}
+    D --> E[Quality]
+    D --> F[Security]
+    D --> G[Test impact]
+    D --> H[Context]
+    E --> I[Verifier]
+    F --> I
+    G --> I
+    H --> I
+    I --> J[review.json / review.md / trace.json]
 ```
 
-* Add your `OPENAI_API_KEY` to the `.env` file as we use gpt-4o-mini to perform fetching PRs, files, etc.
-* Add your `ANTHROPIC_API_KEY` to the `.env` file - this project uses Anthropic's models for code review.
+Dynamic routing is deterministic: documentation-only changes run quality checks; executable changes add test-impact analysis; high-risk or large changes add security and context agents. Single and static strategies are available for evaluation. Specialist agents run concurrently under a semaphore, with a timeout, one bounded retry, independent error records, and no code execution or delegation.
 
-## Configuration
+## Install
 
-- `src/code_review_crew_for_github_pull_request/config/agents.yaml`: Define agent roles and configurations
-- `src/code_review_crew_for_github_pull_request/config/tasks.yaml`: Specify tasks for code review process
-- `src/code_review_crew_for_github_pull_request/crew.py`: Customize logic, tools, and arguments
-- `src/code_review_crew_for_github_pull_request/main.py`: Add custom inputs for agents and tasks
-
-## Usage
-
-Run the code review crew:
+Python 3.10-3.13 and [uv](https://docs.astral.sh/uv/) are supported.
 
 ```bash
-crewai run
+uv sync
+cp .env.example .env
 ```
 
-This command initializes the crew, assigns tasks, and generates a comprehensive code review report.
+For online reviews, set `DEEPSEEK_API_KEY` and optionally `DEEPSEEK_API_BASE`, `DEEPSEEK_MODEL`, or `PRGUARD_MODEL`. Set `GITHUB_TOKEN_CODEREVIEW` for private repositories or higher GitHub API limits. The token is read only; PRGuard never posts comments or modifies repositories.
 
-## Task Workflow
+For local, concurrent demos, set `OTEL_SDK_DISABLED=true` to disable CrewAI's anonymous telemetry initialization. If CrewAI reports a SQLite permission error for its task-output store, set `CREWAI_STORAGE_DIR=prguard` to use a separate local storage namespace.
 
-1. **Analyze Code Changes**: Evaluate modified files for quality issues and suggest improvements
-2. **Find Related PRs**: Search for and analyze previous related pull requests
-3. **Analyze Related Files**: Identify and analyze files functionally or logically related to the changes
-4. **Generate Review Comment**: Synthesize insights into a comprehensive code review comment
+The checked-in dependency lock keeps CrewAI at the existing `0.98.0`. No full framework upgrade is required for the Flow API used here.
 
-## Support
+## CLI
 
-For support or questions:
-- Visit our [documentation](https://docs.crewai.com)
-- Check our [GitHub ](https://github.com/crewAIInc)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
+Review a PR by repository and number:
 
-Leverage the power of AI for efficient and thorough code reviews with this crew!
+```bash
+uv run prguard review --repo owner/repo --pr 123 --strategy dynamic --output-dir artifacts/review
+```
+
+Or use a canonical GitHub PR URL:
+
+```bash
+uv run prguard review --url https://github.com/owner/repo/pull/123 --strategy dynamic
+```
+
+The command accepts `--model`, `--concurrency`, `--timeout-seconds`, and `--max-agent-calls`. The CLI reviews a real GitHub PR; offline fixture evaluation is provided by the `evals.run` command below.
+
+## Offline demo and evaluation
+
+The checked-in dataset contains 15 manually reviewed Python fixtures covering null handling, missing exceptions, boundaries, resource leaks, SQL and shell injection, permissions, hard-coded secrets, test gaps, safe security patterns, documentation changes, and normal PRs.
+
+Run all three strategies without an API key:
+
+```bash
+uv run python -m evals.run --mode offline --output artifacts/evals
+```
+
+Run one strategy:
+
+```bash
+uv run python -m evals.run --mode offline --strategy dynamic
+```
+
+The command writes timestamped `results.json`, `results.csv`, `benchmark.md`, and `benchmark.svg`. Offline scores describe the deterministic fixture runner plus routing, verification, and metric pipeline; they are not LLM quality claims. Online evaluation is available with the same fixtures once an API key is configured:
+
+```bash
+uv run python -m evals.run --mode online --strategy dynamic --model deepseek/deepseek-chat
+```
+
+See [evaluation](docs/evaluation.md) for the matching rule and [benchmark](docs/benchmark.md) for the current offline record.
+
+## API
+
+Start the minimal FastAPI service:
+
+```bash
+uv run uvicorn prguard.api:app --reload
+```
+
+`POST /reviews` creates a background review, `GET /reviews/{run_id}` returns status and findings, `GET /reviews/{run_id}/result` returns the completed result, and `GET /reviews/{run_id}/metrics` returns execution metrics. Requests use the same Pydantic validation as the CLI.
+
+## Web Dashboard
+
+The Vue dashboard lives in `frontend/` and consumes the `/api/*` endpoints. It supports an explicitly labeled offline Demo Fixture mode, live GitHub reviews, SSE event replay, a Vue Flow execution graph, a Monaco Diff viewer, and the generated Benchmark artifacts.
+
+Start the backend and frontend in separate terminals:
+
+```bash
+OTEL_SDK_DISABLED=true CREWAI_STORAGE_DIR=prguard uv run uvicorn prguard.api:app --reload
+cd frontend && npm install && npm run dev
+```
+
+Open `http://127.0.0.1:5173/`. Demo cases use the manually reviewed local fixtures and deterministic runner; they are clearly marked in the UI and are not real LLM quality measurements. Live mode requires the configured `.env` keys. Dashboard events are kept in memory, so a backend restart loses active runs and their SSE history.
+
+Frontend checks:
+
+```bash
+cd frontend
+npm test
+npm run build
+```
+
+## Tests
+
+Tests never call a real LLM or write to GitHub:
+
+```bash
+uv run pytest -q
+```
+
+They cover input validation, GitHub error handling, deterministic routing, context and verifier boundaries, offline agent failure behavior, metrics, and API basics.
+
+## Reports and safety
+
+Each run receives a UUID and writes `review.json`, `review.md`, and `trace.json`. Reports include the head SHA, selected agents, findings, token usage, latency, errors, and prompt version. Trace files omit complete private repository contents and credentials. PR text, comments, README files, and code are treated as untrusted input; agent prompts ignore embedded instructions and no agent may execute repository code or shell commands.
+
+Further details are in [architecture](docs/architecture.md) and [technical decisions](docs/technical-decisions.md).

@@ -24,6 +24,10 @@ find_related_prs_task:
   description: >
     Search for and analyze previous pull requests that are related to the current changes.
 
+    Call the `Find Related Pull Requests` tool with repo_name="{repo_name}",
+    pr_patch_url="{pr_patch_url}", and file_paths set to the repository-relative paths of the
+    files modified by this pull request (for example "lib/crewai/src/crewai/crew.py").
+
     For each related PR found
     1. Fetch and analyze their content using the PR patch URL
     2. Extract key discussions and code changes
@@ -53,6 +57,9 @@ analyze_related_files_task:
   description: >
     Using repository {repo_name}, identify and analyze
     files that are functionally or logically related to the modified files.
+
+    Call the `Find Related Files` tool with repo_name="{repo_name}" and file_paths set to the
+    repository-relative paths of the files modified by this pull request.
 
     For each related file identified
     1. Fetch its current content
