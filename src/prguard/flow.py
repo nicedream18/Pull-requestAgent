@@ -288,6 +288,7 @@ class ReviewFlow(Flow[FlowState]):
             self.source_map,
             self.related_paths,
             check_conditions=self.request.condition_checks,
+            resolve_paths=self.request.resolve_paths,
         )
         self.state.verified_findings = verified
         for error in rejected:

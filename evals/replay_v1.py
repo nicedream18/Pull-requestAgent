@@ -112,6 +112,12 @@ def _reverify(cases: list[dict], by_case: dict[str, list[Finding]], *, check_con
             sources,
             check_conditions=check_conditions,
             require_trigger=False,
+            # Keep this historical replay about verifier acceptance only. Path
+            # recovery and the new deduplicator are measured separately by
+            # evals.path_ablation, and mixing them here would move the historical
+            # numbers every time dedup changes.
+            resolve_paths=False,
+            dedupe=False,
         )
         verified_by_case[case["case_id"]] = verified
         rejected += len(rejects)

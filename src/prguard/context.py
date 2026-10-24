@@ -126,7 +126,14 @@ def build_context_bundle(
             ranked.append((score, path, source))
 
     selected = sorted(ranked, key=lambda row: (-row[0], row[1]))[:top_k]
-    optimized_blocks = [f"Changed PR diff (complete={snapshot.diff_complete}):\n{snapshot.diff}"]
+    allowed_paths = ", ".join(file.path for file in snapshot.files) or "(none)"
+    allowed_line = (
+        "Changed files (a finding's file_path must be exactly one of these, copied verbatim; "
+        f"never 'unknown', an empty string or a bare filename): {allowed_paths}"
+    )
+    optimized_blocks = [
+        f"{allowed_line}\n\nChanged PR diff (complete={snapshot.diff_complete}):\n{snapshot.diff}"
+    ]
     selected_paths: list[str] = []
     used_chars = len(optimized_blocks[0])
     for _, path, source in selected:

@@ -23,6 +23,15 @@ jobs:
         run: PYTHONPATH=src uv run python -m evals.run --mode offline --output artifacts/ci
       - name: Offline ablation harness
         run: PYTHONPATH=src uv run python -m evals.ablation --mode offline --output artifacts/ci-ablation
+      - name: Path and dedup replay (frozen findings)
+        run: |
+          if [ -f artifacts/evals/ablation/20261024T102247Z/ablation.json ]; then
+            PYTHONPATH=src uv run python -m evals.path_ablation \
+              --input artifacts/evals/ablation/20261024T102247Z/ablation.json \
+              --output artifacts/ci-path-ablation
+          else
+            echo "frozen online artifact not present (it is git-ignored); skipping"
+          fi
       - name: Assert the offline baseline did not regress
         run: |
           python - <<'PY'

@@ -49,6 +49,12 @@ def _markdown(state: FlowState, snapshot: PRSnapshot) -> str:
             "",
             f"修复建议：{finding.suggestion}",
         ])
+        if finding.reported_path and finding.reported_path != finding.file_path:
+            lines.extend([
+                "",
+                f"路径已校验恢复：原值 `{finding.reported_path}` → `{finding.file_path}`"
+                f"（{finding.path_status}：{finding.path_basis or ''}）",
+            ])
         if finding.finding_type.value == "advisory":
             lines.extend(["", "这是一条改进建议，不是已确认的缺陷。"])
         if finding.needs_human_review:

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from prguard.evidence import CONTRADICTED, SUPPORTED, evaluate_condition
+from prguard.paths import PathResolver, normalize_path
 from prguard.models import (
     EvidenceLevel,
     Finding,
@@ -17,20 +18,68 @@ def _normalized_text(finding: Finding) -> str:
     return re.sub(r"\W+", " ", f"{finding.title} {finding.description}".lower()).strip()
 
 
+def _norm_evidence(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _text_overlap(left: str, right: str) -> float:
+    a, b = set(left.split()), set(right.split())
+    return len(a & b) / max(1, len(a | b))
+
+
+def _trigger_conflicts(left: Finding, right: Finding) -> bool:
+    """Two stated, disjoint triggers describe different failure conditions."""
+    a, b = _norm_evidence(left.trigger_condition), _norm_evidence(right.trigger_condition)
+    if not a or not b:
+        return False
+    return not (set(a.split()) & set(b.split()))
+
+
 def _same_issue(left: Finding, right: Finding) -> bool:
-    if left.file_path != right.file_path:
+    """Decide whether two accepted findings report one problem.
+
+    Signals, strongest first. Deliberately not text-similarity driven: the agents
+    answer in Chinese with different wording for the same defect, which is exactly the
+    case that must merge, while two different defects on one line must not.
+
+    1. same file (after path normalization)
+    2. same location: line numbers within two, or both absent
+    3. same issue kind: two different specific issue_type values are different defects
+    4. evidence identity: identical or contained evidence is the same citation
+    5. trigger condition: explicitly disjoint triggers are different defects
+    6. only then fall back to wording similarity
+    """
+    if normalize_path(left.file_path) != normalize_path(right.file_path):
         return False
-    if left.issue_type != right.issue_type and left.category != right.category:
+
+    a_line, b_line = left.start_line or 0, right.start_line or 0
+    if a_line and b_line and abs(a_line - b_line) > 2:
         return False
-    left_line, right_line = left.start_line or 0, right.start_line or 0
-    if left_line and right_line and abs(left_line - right_line) > 5:
+
+    left_type, right_type = left.issue_type.value, right.issue_type.value
+    if left_type != right_type and "other" not in (left_type, right_type):
         return False
-    a, b = set(_normalized_text(left).split()), set(_normalized_text(right).split())
-    overlap = len(a & b) / max(1, len(a | b))
-    if left.issue_type != right.issue_type and left.issue_type.value != "other":
-        # Distinct issue types on the same file are distinct problems.
+
+    evidence_left, evidence_right = _norm_evidence(left.evidence), _norm_evidence(right.evidence)
+    if evidence_left and evidence_right:
+        if evidence_left == evidence_right:
+            # A byte-identical code citation is the same evidence, whatever the prose.
+            # Trigger wording differs freely between agents (and Chinese has no word
+            # boundaries to compare), so it must not override an exact citation.
+            return True
+        if evidence_left in evidence_right or evidence_right in evidence_left:
+            return True
+        same_place = bool(a_line) and a_line == b_line
+        # Here the evidence differs, so a stated, disjoint trigger is decisive.
+        if same_place and left_type == right_type != "other" and _trigger_conflicts(left, right) is False:
+            if _text_overlap(evidence_left, evidence_right) >= 0.6:
+                return True
+
+    if _trigger_conflicts(left, right):
         return False
-    return overlap >= 0.42 or (left_line and left_line == right_line and overlap >= 0.25)
+
+    overlap = _text_overlap(_normalized_text(left), _normalized_text(right))
+    return overlap >= 0.42 or (bool(a_line) and a_line == b_line and overlap >= 0.25)
 
 
 def changed_lines(snapshot: PRSnapshot) -> dict[str, set[int]]:
@@ -182,10 +231,15 @@ def verify_findings(
     *,
     check_conditions: bool = True,
     require_trigger: bool = True,
+    resolve_paths: bool = False,
+    dedupe: bool = True,
 ) -> tuple[list[Finding], list[dict[str, str]]]:
     """Layer 1 deterministic checks, layer 2 condition checks, then deduplicate."""
     valid_paths = {file.path for file in snapshot.files} | (related_paths or set())
     touched = changed_lines(snapshot)
+    resolver = (
+        PathResolver([file.path for file in snapshot.files], source_map) if resolve_paths else None
+    )
     accepted: list[Finding] = []
     rejected: list[dict[str, str]] = []
 
@@ -193,6 +247,22 @@ def verify_findings(
         # Verify a copy: callers keep the agent output for pre-verifier scoring and
         # for replay, so it must stay byte-identical after verification.
         finding = original.model_copy(deep=True)
+
+        if resolver is not None:
+            resolution = resolver.resolve(finding.file_path, finding.start_line, finding.evidence)
+            finding.reported_path = resolution.original
+            finding.path_status = resolution.status
+            finding.path_basis = resolution.basis
+            if resolution.is_resolved:
+                finding.file_path = resolution.resolved or finding.file_path
+            else:
+                rejected.append(
+                    _Rejection(
+                        "path_unresolved", f"{resolution.status}: {resolution.basis}"
+                    ).as_dict(finding)
+                )
+                continue
+
         failure = _layer_one(finding, snapshot, source_map, valid_paths)
         if failure is not None:
             rejected.append(failure.as_dict(finding))
@@ -243,6 +313,9 @@ def verify_findings(
         if finding.confidence < 0.55:
             finding.needs_human_review = True
         accepted.append(finding)
+
+    if not dedupe:
+        return accepted, rejected
 
     groups: list[list[Finding]] = []
     for finding in accepted:

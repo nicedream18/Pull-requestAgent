@@ -74,6 +74,9 @@ class PRReviewRequest(BaseModel):
     max_agent_calls: int = Field(default=6, ge=1, le=12)
     # Ablation switch: disable layer-2 condition checks to measure their effect.
     condition_checks: bool = True
+    # Recover a missing or placeholder file_path from trusted diff data before
+    # rejecting the finding. Never guesses; see prguard.paths.
+    resolve_paths: bool = True
 
     @model_validator(mode="after")
     def validate_target(self) -> "PRReviewRequest":
@@ -168,6 +171,12 @@ class Finding(BaseModel):
     trigger_condition: str = Field(default="", max_length=600)
     expected_behavior: str = Field(default="", max_length=600)
     actual_behavior: str = Field(default="", max_length=600)
+
+    # Path provenance, populated by the verifier. The agent's own value is kept in
+    # `reported_path` so a recovered location is never silently presented as original.
+    reported_path: Optional[str] = Field(default=None, max_length=400)
+    path_status: str = "exact"
+    path_basis: Optional[str] = Field(default=None, max_length=400)
 
     # Populated by the verifier, not by the agent.
     evidence_level: EvidenceLevel = EvidenceLevel.PARTIAL

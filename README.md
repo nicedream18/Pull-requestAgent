@@ -99,6 +99,37 @@ Layer 2 uses syntax trees, and only uses text matching to *refute* a claim. A fi
 
 **Evaluation accounting.** Advisories no longer enter defect precision, but the evaluator also reports `strict_precision` where advisories count as false positives, plus `advisory_rate`, `verifier_rejection_rate`, per-agent rejection rates, and verifier before/after counts. Labelling everything as advice therefore cannot raise the headline number.
 
+## Path recovery and dedup
+
+The first online run produced 28 findings and only 7 carried a usable `file_path`: the
+model wrote `unknown` (13), an empty string (3), a bare basename (4) or a non-existent
+file (1). Layer 1 therefore rejected 21 findings that were otherwise well formed.
+
+`prguard.paths.PathResolver` recovers a path only from data the pipeline already trusts:
+the PR's changed files, their sources, the cited line and the verbatim evidence. Statuses
+are `exact`, `normalized`, `evidence_resolved`, `ambiguous`, `unresolved`; the original
+value is kept in `reported_path` and the basis in `path_basis`, so a report never hides a
+correction. Two guards matter: a bare basename must be unique in the diff, and evidence
+must be unique to one changed file *and* within two lines of the cited line. A finding
+whose evidence appears in two files is `ambiguous`, never "first match".
+
+Deduplication now ranks signals by what they prove rather than by text similarity, which
+does not work on Chinese: identical file, line within two, one specific `issue_type`, and
+byte-identical evidence is the same citation. Two different `issue_type` values are never
+merged, so two real defects in one function stay separate.
+
+Replaying the frozen online findings (`evals.path_ablation`, no model call):
+
+| Config | P | R | F1 | TP | FP | FN |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A layer 1 only | 0.667 | 0.400 | 0.500 | 4 | 2 | 6 |
+| B + path recovery | 0.333 | 0.800 | 0.471 | 8 | 16 | 2 |
+| C + dedup | 0.615 | 0.800 | 0.696 | 8 | 5 | 2 |
+| D + layer 2 | 0.800 | 0.800 | 0.800 | 8 | 2 | 2 |
+
+Path recovery buys recall and costs precision; dedup and layer 2 recover the precision.
+Full analysis: [path-and-dedup-analysis](docs/path-and-dedup-analysis.md).
+
 ## Verifier ablation harness
 
 `evals/ablation.py` compares verifier configurations without paying for a second model

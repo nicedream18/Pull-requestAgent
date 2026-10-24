@@ -534,7 +534,98 @@ Verified before any spend:
 | Duplicate spend | impossible by design: both rungs replay the same frozen findings | `_replay_verifier` |
 | Artifacts | `ablation.json` with raw findings, per-rung verified findings, rejection reasons, tokens, calls, latency | `output_dir` |
 
-## 16. Next command, pending budget approval
+## 16. Path recovery and dedup ablation (frozen findings, no model call)
+
+The first online run lost 21 of 28 findings to `invalid_path`, and its 2 remaining false
+positives were duplicates. `evals.path_ablation` replays the **frozen** findings through
+four configurations, so each step changes one thing. No model was called.
+
+Command:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.path_ablation \
+  --input artifacts/evals/ablation/20261024T102247Z/ablation.json
+```
+
+| Config | P | R | F1 | Strict F1 | TP | FP | FN | Rejections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| A layer 1 only | 0.667 | 0.400 | 0.500 | 0.471 | 4 | 2 | 6 | 21 `invalid_path` |
+| B + path recovery | 0.333 | 0.800 | 0.471 | 0.432 | 8 | 16 | 2 | 1 `path_unresolved` |
+| C + dedup | 0.615 | 0.800 | 0.696 | 0.667 | 8 | 5 | 2 | 1 `path_unresolved` |
+| D + layer 2 | 0.800 | 0.800 | 0.800 | 0.667 | 8 | 2 | 2 | 1 `path_unresolved` |
+
+Row A reproduces the recorded online rung B (4 TP / 2 FP / 6 FN) exactly, which confirms
+the replay is faithful.
+
+### Reading the rows honestly
+
+* **A to B**: path recovery takes recall from 0.400 to 0.800 (+0.400) and precision from
+  0.667 to 0.333 (-0.334). F1 actually falls slightly. Recovery is a **recall device, not
+  a precision device**: it admits findings whose locations were previously discarded, and
+  most of them are wrong or duplicated claims.
+* **B to C**: dedup removes 11 of the 16 false positives (FP 16 to 5), precision 0.333 to
+  0.615, F1 0.471 to 0.696. This is the single largest gain in the table.
+* **C to D**: layer 2 removes 3 more false positives (FP 5 to 2), precision 0.615 to
+  0.800, F1 0.696 to 0.800. **On the first online run layer 2 did nothing; here it does**,
+  because path recovery finally exposes claims that layer 2 can evaluate. Those two
+  findings are not contradictory: layer 2 had nothing to check when every finding was
+  rejected for its path.
+
+The order matters. Layer 2 could not contribute before path recovery, and path recovery
+could not contribute without dedup and layer 2 to control the noise it admits.
+
+### Where the recovered findings come from
+
+| Status | Count |
+| --- | ---: |
+| `exact` | 7 |
+| `normalized` (basename or separators) | 2 |
+| `evidence_resolved` | 18 |
+| `unresolved` | 1 |
+
+Recovery of 20 findings is safe in the sense that each is justified by a changed file, a
+unique evidence match, and a consistent line. It is **not** a claim that each recovered
+finding is correct: 11 of them were duplicates and 3 were false claims.
+
+### New true positives and new false positives
+
+New TPs (A to B) come from `null-deref-01`, `boundary-03`, `resource-leak-04`,
+`division-zero-12`, plus additional matches in `sql-injection-05`,
+`shell-injection-06` and `permissions-11`.
+
+New FPs (A to B) are mostly the same defects reported two or three times, plus
+`safe-subprocess-13` whose 3 findings describe safe code. All but 2 are removed by C and
+D.
+
+### Remaining false positives in D
+
+Both are `missing_exception_handling` and both are label incompleteness, not verifier
+errors:
+
+| Case | Claim | Why layer 2 accepts it |
+| --- | --- | --- |
+| `shell-injection-06` | `subprocess.run` result is not checked | the call really has no `check=True` and no `try` |
+| `safe-subprocess-13` | `CalledProcessError` is unhandled | the call really uses `check=True` outside a `try` |
+
+Each fixture labels exactly one defect, so a second correct observation is charged as a
+false positive. See `docs/path-and-dedup-analysis.md` section 7.
+
+### What this does and does not prove
+
+Proven: on this frozen output, path recovery plus dedup plus layer 2 raises F1 from 0.500
+to 0.800 and recall from 0.400 to 0.800 without adding false positives.
+
+Not proven:
+
+* that prompt v3 improves the model, because **no model was called**; prompt v3 is
+  written and tested but unmeasured, and its brace fix plus path contract are the
+  hypothesis for the next paid run;
+* that recovery is safe on multi-file PRs, because every fixture has one file, so
+  mis-recovery is structurally impossible here. Unit tests cover the multi-file cases,
+  real data does not;
+* that any of this generalises past 15 fixtures, which have been tuned against five times.
+
+## 17. Next command, pending budget approval
 
 ```bash
 # plan only, no tokens

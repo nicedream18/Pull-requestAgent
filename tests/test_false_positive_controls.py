@@ -1,4 +1,6 @@
 
+import re
+
 import pytest
 
 from evals.fixtures import FixtureClient, load_dataset, snapshot_for
@@ -1249,16 +1251,51 @@ def test_coverage_levels_require_the_claimed_failure(label, test_source, claim, 
     assert verdict.status == expected, label
 
 
-def test_agent_prompt_has_no_template_variable_collision():
-    """CrewAI formats the task description with str.format, so literal braces break it."""
+def test_production_task_description_has_no_template_variable_collision():
+    """Exercise the real builder CrewAI receives, not a paraphrase of it.
+
+    The previous version of this test hand-built a description that could not fail,
+    so it never guarded the production string. This one imports the function
+    `run_agent_once` actually uses and asserts it renders with only the intended
+    placeholder.
+    """
     from prguard import agents
 
-    spec = agents.AGENTS["CodeQualityAgent"]
-    description = (
-        f"scope: {spec['goal']} {spec['issue_types']} {spec['rules']} {agents.SHARED_RULES}"
-        " or an empty findings array when nothing is provable."
-        "\n<untrusted_review_context>\n{review_context}\n</untrusted_review_context>"
-    )
-    # Only the intended placeholder may remain; anything else raises KeyError at runtime.
-    rendered = description.format(review_context="X")
-    assert "{review_context}" not in rendered
+    for name in agents.AGENTS:
+        description = agents.build_task_description(name)
+        placeholders = re.findall(r"\{[^{}]*\}", description)
+        # Exactly one: the context injection point.
+        assert placeholders == ["{review_context}"], (name, placeholders)
+        rendered = description.format(review_context="UNTRUSTED")
+        assert "UNTRUSTED" in rendered
+        assert "{review_context}" not in rendered
+
+
+def test_production_prompt_forbids_placeholder_paths():
+    from prguard import agents
+
+    for name in agents.AGENTS:
+        description = agents.build_task_description(name)
+        assert "Never write 'unknown'" in description, name
+        assert "bare filename without its directory" in description, name
+
+
+def test_context_lists_the_allowed_paths_verbatim():
+    """The agent must be told exactly which file_path values are legal."""
+    from prguard.context import build_context_bundle
+
+    case = CASES["sql-injection-05"]
+    snapshot, sources = snapshot_for(case)
+    bundle = build_context_bundle(snapshot, sources, {})
+    assert case["file_path"] in bundle.optimized_context
+    assert "must be exactly one of these" in bundle.optimized_context
+
+
+def test_run_agent_once_uses_the_shared_builder(monkeypatch):
+    """Guards against the builder drifting away from the production call site."""
+    import inspect
+
+    from prguard import agents
+
+    source = inspect.getsource(agents.run_agent_once)
+    assert "build_task_description(" in source
