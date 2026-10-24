@@ -74,8 +74,8 @@ def test_flow_isolates_agent_runner_exception():
     case = load_dataset()["cases"][0]
     snapshot, sources = snapshot_for(case)
 
-    async def runner(agent, context, model, *, semaphore, timeout_seconds):
-        del context, model, semaphore, timeout_seconds
+    async def runner(agent, context, model, *, semaphore, timeout_seconds, prompt_version=None):
+        del context, model, semaphore, timeout_seconds, prompt_version
         if agent == "TestImpactAgent":
             raise RuntimeError("fixture failure")
         return AgentRun(agent=agent, status="success", started_at="now", ended_at="now", calls=1)

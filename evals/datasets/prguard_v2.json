@@ -1,10 +1,11 @@
 {
-  "dataset_version": "2.0-candidate",
+  "dataset_version": "2.1-candidate",
   "description": "Independent multi-file candidate benchmark. Labels are drafts written by the author of the code; none is human-reviewed and none was produced by a model. Do not publish generalisation claims from this set until label_review_status becomes human_reviewed for every case.",
   "label_policy": {
     "allowed_status": [
       "draft",
-      "human_reviewed",
+      "reviewed",
+      "needs_revision",
       "indeterminate"
     ],
     "current": "all cases are draft",
@@ -12,15 +13,17 @@
     "llm_generated_labels": false
   },
   "stats": {
-    "case_count": 32,
+    "case_count": 36,
     "multi_file_cases": 12,
-    "clean_cases": 14,
+    "real_diff_cases": 4,
+    "rename_cases": 1,
+    "clean_cases": 15,
     "multi_defect_cases": 4,
-    "labelled_defects": 23,
+    "labelled_defects": 26,
     "splits": {
-      "dev": 11,
-      "test": 15,
-      "holdout": 6
+      "dev": 12,
+      "test": 17,
+      "holdout": 7
     }
   },
   "cases": [
@@ -623,7 +626,7 @@
       ],
       "defects": [],
       "has_defect": false,
-      "label_review_status": "disputed",
+      "label_review_status": "indeterminate",
       "label_notes": "Argument vector, no shell. A missing_exception_handling claim on line 5 is arguable; see the arbitration report."
     },
     {
@@ -933,7 +936,7 @@
         }
       ],
       "has_defect": true,
-      "label_review_status": "disputed",
+      "label_review_status": "indeterminate",
       "label_notes": "Interprocedural: the sink is on line 3 but the concatenation is on line 2. Layer 2 may answer UNKNOWN."
     },
     {
@@ -1047,6 +1050,132 @@
       "has_defect": true,
       "label_review_status": "draft",
       "label_notes": "Two files with similar names; a Windows-style prediction (app\\\\export.py) must normalize here."
+    },
+    {
+      "case_id": "real-diff-context-33",
+      "pr_title": "fix: change one line of the retry helper",
+      "split": "dev",
+      "files": [
+        {
+          "path": "app/retry.py",
+          "code": "def retry(times):\n    if times <= 0:\n        raise ValueError('times must be positive')\n    for attempt in range(times + 1):\n        yield attempt\n",
+          "base_code": "def retry(times):\n    if times <= 0:\n        raise ValueError('times must be positive')\n    for attempt in range(times):\n        yield attempt\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "real-diff-context-33-d1",
+          "issue_type": "boundary_condition",
+          "defect_type": "boundary_condition",
+          "category": "bug",
+          "severity": "high",
+          "file_path": "app/retry.py",
+          "line_range": [
+            4,
+            4
+          ],
+          "description": "range(times + 1) yields one more attempt than requested.",
+          "trigger_condition": "retry(3) yields four attempts.",
+          "supporting_evidence": "    for attempt in range(times + 1):",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "range(times + 1) yields one more attempt than requested.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Real diff with context: lines 1-3 are unchanged context. A finding there must be marked as reported on unchanged code, not as a change."
+    },
+    {
+      "case_id": "real-diff-rename-34",
+      "pr_title": "refactor: rename helpers.py to utilities.py",
+      "split": "holdout",
+      "files": [
+        {
+          "path": "app/utilities.py",
+          "code": "def helper(path):\n    handle = open(path)\n    return handle.read()\n",
+          "base_code": "def helper(path):\n    handle = open(path)\n    return handle.read()\n",
+          "status": "renamed",
+          "previous_filename": "app/helpers.py"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "real-diff-rename-34-d1",
+          "issue_type": "resource_leak",
+          "defect_type": "resource_leak",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/utilities.py",
+          "line_range": [
+            2,
+            2
+          ],
+          "description": "The handle opened in helper is never closed.",
+          "trigger_condition": "helper() returns before closing the handle.",
+          "supporting_evidence": "    handle = open(path)",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "The handle opened in helper is never closed.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "draft",
+      "label_notes": "Pure rename with an unchanged body. A finding may legitimately cite the old path app/helpers.py; PathResolver must map it forward, and the diff carries rename metadata."
+    },
+    {
+      "case_id": "real-diff-deletion-35",
+      "pr_title": "fix: remove the unsafe chmod call",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/uploads.py",
+          "code": "import os\n\n\ndef save(path):\n    return path\n",
+          "base_code": "import os\n\n\ndef save(path):\n    os.chmod(path, 0o777)\n    return path\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [],
+      "has_defect": false,
+      "label_review_status": "draft",
+      "label_notes": "The defect was removed. The diff contains a deleted line; a finding still citing os.chmod must be rejected because that line is gone from the head revision."
+    },
+    {
+      "case_id": "real-diff-guard-line-36",
+      "pr_title": "feat: filter the empty rows",
+      "split": "test",
+      "files": [
+        {
+          "path": "app/rows.py",
+          "code": "def non_empty(rows):\n    result = []\n    for row in rows:\n        if row:\n            result.append(row[0])\n    return result\n",
+          "base_code": "def non_empty(rows):\n    result = []\n    for row in rows:\n        if row:\n            result.append(row)\n    return result\n",
+          "status": "modified"
+        }
+      ],
+      "defects": [
+        {
+          "defect_id": "real-diff-guard-line-36-d1",
+          "issue_type": "boundary_condition",
+          "defect_type": "boundary_condition",
+          "category": "bug",
+          "severity": "medium",
+          "file_path": "app/rows.py",
+          "line_range": [
+            5,
+            5
+          ],
+          "description": "row[0] is read without checking that the row has elements.",
+          "trigger_condition": "row is a non-empty list or string whose first element is intended.",
+          "supporting_evidence": "            result.append(row[0])",
+          "expected_behavior": "The unsafe value is validated or contained before use.",
+          "actual_behavior": "row[0] is read without checking that the row has elements.",
+          "label_review_status": "draft"
+        }
+      ],
+      "has_defect": true,
+      "label_review_status": "indeterminate",
+      "label_notes": "The guard `if row:` already excludes empty rows, so row[0] is arguably safe. Kept as a disputed label: the reviewer decides, and the case measures whether a one-line-off finding still matches."
     }
   ]
 }

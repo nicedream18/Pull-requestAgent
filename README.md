@@ -149,9 +149,10 @@ plumbing only and says nothing about prompt quality.
 
 ## Independent candidate benchmark
 
-`evals/datasets/prguard_v2.json` is a 32-case set built to test what the 15 development
-fixtures cannot: 12 multi-file PRs, 14 clean PRs, 4 PRs with several defects, and 23
-labelled defects across three splits (11 dev / 15 test / 6 holdout).
+`evals/datasets/prguard_v2.json` is a 36-case set built to test what the 15 development
+fixtures cannot: 12 multi-file PRs, 15 clean PRs, 4 PRs with several defects, 26 labelled
+defects across three splits (12 dev / 17 test / 7 holdout), and 4 cases with a real unified
+diff (base revision, context lines, deletions, one rename).
 
 **No label in it is human-reviewed, and none was produced by a model.** All are `draft`,
 written alongside the fixture code. `evals/check_labels.py` verifies internal consistency
@@ -162,8 +163,24 @@ reviewer first; `check_labels --require-reviewed` refuses to run while drafts re
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m evals.check_labels
-python evals/datasets/build_prguard_v2.py     # rebuild from the generator
+PYTHONPATH=src .venv/bin/python -m evals.review_packet   # review material into docs/review/
+python evals/datasets/build_prguard_v2.py               # rebuild from the generator
 ```
+
+## Prompt versions
+
+Agent prompt bodies are versioned, not overwritten. `--prompt-version` selects one and the
+choice reaches the real CrewAI `Task`, not just a report label:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
+  --prompt-version prguard-review-v2 --dry-run   # prints sha 044658d206ef
+PYTHONPATH=src .venv/bin/python -m evals.ablation --mode online \
+  --prompt-version prguard-review-v3 --dry-run   # prints sha c6166a6c6edd
+```
+
+`prguard-review-v2` is restored verbatim from the commit that produced the first valid
+online run, and a test pins its sha so the baseline cannot drift.
 
 See [dataset-design](docs/dataset-design.md) and [evaluation-protocol](docs/evaluation-protocol.md).
 

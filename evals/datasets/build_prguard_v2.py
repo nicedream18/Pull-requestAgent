@@ -26,7 +26,10 @@ from pathlib import Path
 OUT = Path(__file__).parent / "prguard_v2.json"
 
 DRAFT = "draft"
-DISPUTED = "disputed"
+# The reviewer vocabulary fixed by docs/evaluation-protocol.md.
+REVIEWED = "reviewed"
+NEEDS_REVISION = "needs_revision"
+INDETERMINATE = "indeterminate"
 
 
 def defect(
@@ -84,7 +87,23 @@ def case(
 
 
 def f(path: str, code: str, status: str = "modified") -> dict:
+    """A synthetic file change: no base revision, so the diff is all-additions."""
     return {"path": path, "code": code, "status": status}
+
+
+def fr(
+    path: str,
+    base_code: str,
+    head_code: str,
+    *,
+    previous_filename: str | None = None,
+) -> dict:
+    """A real change with a base revision, so the diff has context and deletions."""
+    entry = {"path": path, "code": head_code, "base_code": base_code, "status": "modified"}
+    if previous_filename:
+        entry["previous_filename"] = previous_filename
+        entry["status"] = "renamed"
+    return entry
 
 
 CASES: list[dict] = [
@@ -456,7 +475,7 @@ CASES: list[dict] = [
         [],
         has_defect=False,
         notes="Argument vector, no shell. A missing_exception_handling claim on line 5 is arguable; see the arbitration report.",
-        status=DISPUTED,
+        status=INDETERMINATE,
     ),
     case(
         "safe-with-open-17",
@@ -674,7 +693,7 @@ CASES: list[dict] = [
                 expected_behavior="Validate the table against an allow-list; identifiers cannot be bound.",
             )
         ],
-        status=DISPUTED,
+        status=INDETERMINATE,
         notes="Interprocedural: the sink is on line 3 but the concatenation is on line 2. Layer 2 may answer UNKNOWN.",
     ),
     case(
@@ -737,6 +756,131 @@ CASES: list[dict] = [
         ],
         notes="Two files with similar names; a Windows-style prediction (app\\\\export.py) must normalize here.",
     ),
+
+    # ---------------------------------------------------------------- real unified diffs
+    case(
+        "real-diff-context-33",
+        "fix: change one line of the retry helper",
+        "dev",
+        [
+            fr(
+                "app/retry.py",
+                "def retry(times):\n"
+                "    if times <= 0:\n"
+                "        raise ValueError('times must be positive')\n"
+                "    for attempt in range(times):\n"
+                "        yield attempt\n",
+                "def retry(times):\n"
+                "    if times <= 0:\n"
+                "        raise ValueError('times must be positive')\n"
+                "    for attempt in range(times + 1):\n"
+                "        yield attempt\n",
+            )
+        ],
+        [
+            defect(
+                "real-diff-context-33-d1",
+                "boundary_condition",
+                "app/retry.py",
+                [4, 4],
+                severity="high",
+                description="range(times + 1) yields one more attempt than requested.",
+                trigger_condition="retry(3) yields four attempts.",
+                supporting_evidence="    for attempt in range(times + 1):",
+            )
+        ],
+        notes=(
+            "Real diff with context: lines 1-3 are unchanged context. A finding there must be "
+            "marked as reported on unchanged code, not as a change."
+        ),
+    ),
+    case(
+        "real-diff-rename-34",
+        "refactor: rename helpers.py to utilities.py",
+        "holdout",
+        [
+            fr(
+                "app/utilities.py",
+                "def helper(path):\n    handle = open(path)\n    return handle.read()\n",
+                "def helper(path):\n    handle = open(path)\n    return handle.read()\n",
+                previous_filename="app/helpers.py",
+            )
+        ],
+        [
+            defect(
+                "real-diff-rename-34-d1",
+                "resource_leak",
+                "app/utilities.py",
+                [2, 2],
+                severity="medium",
+                description="The handle opened in helper is never closed.",
+                trigger_condition="helper() returns before closing the handle.",
+                supporting_evidence="    handle = open(path)",
+            )
+        ],
+        notes=(
+            "Pure rename with an unchanged body. A finding may legitimately cite the old path "
+            "app/helpers.py; PathResolver must map it forward, and the diff carries rename metadata."
+        ),
+    ),
+    case(
+        "real-diff-deletion-35",
+        "fix: remove the unsafe chmod call",
+        "test",
+        [
+            fr(
+                "app/uploads.py",
+                "import os\n\n\ndef save(path):\n    os.chmod(path, 0o777)\n    return path\n",
+                "import os\n\n\ndef save(path):\n    return path\n",
+            )
+        ],
+        [],
+        has_defect=False,
+        notes=(
+            "The defect was removed. The diff contains a deleted line; a finding still citing "
+            "os.chmod must be rejected because that line is gone from the head revision."
+        ),
+    ),
+    case(
+        "real-diff-guard-line-36",
+        "feat: filter the empty rows",
+        "test",
+        [
+            fr(
+                "app/rows.py",
+                "def non_empty(rows):\n"
+                "    result = []\n"
+                "    for row in rows:\n"
+                "        if row:\n"
+                "            result.append(row)\n"
+                "    return result\n",
+                "def non_empty(rows):\n"
+                "    result = []\n"
+                "    for row in rows:\n"
+                "        if row:\n"
+                "            result.append(row[0])\n"
+                "    return result\n",
+            )
+        ],
+        [
+            defect(
+                "real-diff-guard-line-36-d1",
+                "boundary_condition",
+                "app/rows.py",
+                [5, 5],
+                severity="medium",
+                description="row[0] is read without checking that the row has elements.",
+                trigger_condition="row is a non-empty list or string whose first element is intended.",
+                supporting_evidence="            result.append(row[0])",
+            )
+        ],
+        status=INDETERMINATE,
+        notes=(
+            "The guard `if row:` already excludes empty rows, so row[0] is arguably safe. Kept as "
+            "a disputed label: the reviewer decides, and the case measures whether a one-line-off "
+            "finding still matches."
+        ),
+    ),
 ]
 
 
@@ -749,7 +893,7 @@ def main() -> int:
     multi_defect = sum(1 for item in CASES if len(item["defects"]) > 1)
 
     document = {
-        "dataset_version": "2.0-candidate",
+        "dataset_version": "2.1-candidate",
         "description": (
             "Independent multi-file candidate benchmark. Labels are drafts written by the "
             "author of the code; none is human-reviewed and none was produced by a model. "
@@ -757,7 +901,7 @@ def main() -> int:
             "becomes human_reviewed for every case."
         ),
         "label_policy": {
-            "allowed_status": [DRAFT, "human_reviewed", "indeterminate"],
+            "allowed_status": [DRAFT, REVIEWED, NEEDS_REVISION, INDETERMINATE],
             "current": "all cases are draft",
             "human_reviewed_count": 0,
             "llm_generated_labels": False,
@@ -765,6 +909,10 @@ def main() -> int:
         "stats": {
             "case_count": len(CASES),
             "multi_file_cases": multi,
+            "real_diff_cases": sum(1 for item in CASES if any("base_code" in entry for entry in item["files"])),
+            "rename_cases": sum(
+                1 for item in CASES for entry in item["files"] if entry.get("previous_filename")
+            ),
             "clean_cases": clean,
             "multi_defect_cases": multi_defect,
             "labelled_defects": sum(len(item["defects"]) for item in CASES),

@@ -156,6 +156,60 @@ def strict_match(finding: Finding, truth: dict, source: str = "") -> str | None:
     return "text"
 
 
+def _new_category_stats() -> dict[str, dict[str, int]]:
+    return defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0, "labelled": 0})
+
+
+def _accumulate_categories(
+    per_category: dict[str, dict[str, int]],
+    truths: list[dict],
+    candidates: list[Finding],
+    used_predictions: set[int],
+    used_truths: set[int],
+    *,
+    extra_false_positives: list[Finding] | None = None,
+) -> None:
+    """Attribute one case's outcome to defect categories.
+
+    Each labelled defect contributes **exactly one** of TP or FN, keyed by its own
+    `defect_type`. Each unmatched prediction contributes exactly one FP, keyed by what
+    the prediction claimed. This guarantees, per category, `tp + fn == labelled`, which
+    an earlier implementation broke by crediting every truth as an FN and then adding a
+    TP for each match.
+    """
+    for truth_index, truth in enumerate(truths):
+        bucket = per_category[truth["defect_type"]]
+        bucket["labelled"] += 1
+        if truth_index in used_truths:
+            bucket["tp"] += 1
+        else:
+            bucket["fn"] += 1
+    for prediction_index, finding in enumerate(candidates):
+        if prediction_index not in used_predictions:
+            per_category[finding.issue_type.value]["fp"] += 1
+    for finding in extra_false_positives or []:
+        per_category[finding.issue_type.value]["fp"] += 1
+
+
+def _category_summary(per_category: dict[str, dict[str, int]]) -> dict[str, dict[str, float]]:
+    summary: dict[str, dict[str, float]] = {}
+    for name, values in sorted(per_category.items()):
+        tp, fp, fn = values["tp"], values["fp"], values["fn"]
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+        summary[name] = {
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "labelled": values["labelled"],
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+    return summary
+
+
 def _split(findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
     defects = [item for item in findings if item.finding_type is FindingType.DEFECT]
     advisories = [item for item in findings if item.finding_type is not FindingType.DEFECT]
@@ -175,7 +229,7 @@ def _greedy(score_pairs: list[tuple[float, int, int]]) -> tuple[set[int], set[in
 
 def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]], *, include_advisories: bool) -> dict:
     true_positive = false_positive = false_negative = 0
-    per_category: dict[str, dict[str, int]] = defaultdict(lambda: {"tp": 0, "fn": 0})
+    per_category = _new_category_stats()
     no_defect_findings = 0
     for case in cases:
         predicted = predicted_by_case.get(case["case_id"], [])
@@ -195,14 +249,15 @@ def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]]
         true_positive += tp
         false_positive += fp
         false_negative += fn
-        if case_has_defect(case):
-            for truth in truths:
-                metric = per_category[truth["defect_type"]]
-                metric["fn"] += 1
-            for prediction_index in used_predictions:
-                metric = per_category[counted[prediction_index].issue_type.value]
-                metric["tp"] += 1
-        else:
+        _accumulate_categories(
+            per_category,
+            truths,
+            counted,
+            used_predictions,
+            used_truths,
+            extra_false_positives=[] if include_advisories else [],
+        )
+        if not case_has_defect(case):
             no_defect_findings += len(counted)
 
     precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
@@ -215,10 +270,8 @@ def _legacy_score(cases: list[dict], predicted_by_case: dict[str, list[Finding]]
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "category_recall": {
-            name: values["tp"] / (values["tp"] + values["fn"]) if values["tp"] + values["fn"] else 0.0
-            for name, values in sorted(per_category.items())
-        },
+        "category_recall": {name: values["recall"] for name, values in _category_summary(per_category).items()},
+        "category_stats": _category_summary(per_category),
         "false_positives_per_no_defect_pr": no_defect_findings
         / max(1, sum(not case_has_defect(case) for case in cases)),
     }
@@ -238,7 +291,7 @@ def _unified_score(
     """
     true_positive = false_positive = false_negative = 0
     channels = {"structured": 0, "text": 0}
-    per_category: dict[str, dict[str, int]] = defaultdict(lambda: {"tp": 0, "fn": 0})
+    per_category = _new_category_stats()
     no_defect_findings = 0
     no_defect_cases = max(1, sum(not case_has_defect(case) for case in cases))
     for case in cases:
@@ -273,14 +326,15 @@ def _unified_score(
         true_positive += tp
         false_positive += fp
         false_negative += fn
-        if case_has_defect(case):
-            for truth in truths:
-                metric = per_category[truth["defect_type"]]
-                metric["fn"] += 1
-            for prediction_index in used_predictions:
-                metric = per_category[candidates[prediction_index].issue_type.value]
-                metric["tp"] += 1
-        else:
+        _accumulate_categories(
+            per_category,
+            truths,
+            candidates,
+            used_predictions,
+            used_truths,
+            extra_false_positives=list(advisories) if count_advisories_as_fp else [],
+        )
+        if not case_has_defect(case):
             no_defect_findings += len(candidates) + (len(advisories) if count_advisories_as_fp else 0)
 
     precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
@@ -293,10 +347,8 @@ def _unified_score(
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "category_recall": {
-            name: values["tp"] / (values["tp"] + values["fn"]) if values["tp"] + values["fn"] else 0.0
-            for name, values in sorted(per_category.items())
-        },
+        "category_recall": {name: values["recall"] for name, values in _category_summary(per_category).items()},
+        "category_stats": _category_summary(per_category),
         "false_positives_per_no_defect_pr": no_defect_findings / no_defect_cases,
         "match_channels": dict(channels),
     }
@@ -358,6 +410,8 @@ def evaluate_cases(
         "defect_recall": defect["recall"],
         "f1_score": defect["f1"],
         "category_recall": defect["category_recall"],
+        "category_stats": defect["category_stats"],
+        "strict_category_stats": strict["category_stats"],
         "false_positives_per_no_defect_pr": defect["false_positives_per_no_defect_pr"],
         "match_channels": defect.get("match_channels", {}),
         "strict_tp": strict["tp"],

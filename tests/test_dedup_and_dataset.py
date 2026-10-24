@@ -269,3 +269,44 @@ def test_frozen_fixture_reproduces_the_published_ablation():
     assert rows["B"]["tp"] == 8 and rows["B"]["fn"] == 2
     assert rows["C"]["fp"] == 5
     assert rows["D"] == {"tp": 8, "fp": 2, "fn": 2, "recoveries": 12}
+
+
+# --- review packet (P3) ------------------------------------------------------
+
+
+def test_review_packet_never_raises_a_status():
+    """The generator must not mark anything reviewed, ever."""
+    from evals.review_packet import build
+
+    dataset = json.loads(DATASET_V2.read_text(encoding="utf-8"))
+    markdown, rows, summary = build(dataset, None)
+    assert len({row["case_id"] for row in rows}) == len(dataset["cases"])
+    for row in rows:
+        assert row["review_status"] in {"draft", "reviewed", "needs_revision", "indeterminate"}
+        # Only statuses the dataset already carries may appear.
+        assert row["review_status"] != "reviewed" or dataset["label_policy"]["human_reviewed_count"] > 0
+        assert row["is_substantive_defect"] == ""
+    assert "reviewed: 0" in summary
+
+
+def test_review_packet_covers_every_file_and_lists_clean_cases():
+    from evals.review_packet import build
+
+    dataset = json.loads(DATASET_V2.read_text(encoding="utf-8"))
+    markdown, rows, summary = build(dataset, None)
+    for case in dataset["cases"]:
+        assert f"## {case['case_id']}" in markdown
+        for entry in case_files(case):
+            assert f"`{entry['path']}`" in markdown
+    clean = [case["case_id"] for case in dataset["cases"] if not case_defects(case)]
+    for case_id in clean:
+        assert f"`{case_id}`" in summary
+
+
+def test_review_packet_shows_before_and_after_for_real_diffs():
+    from evals.review_packet import build
+
+    dataset = json.loads(DATASET_V2.read_text(encoding="utf-8"))
+    markdown, _, _ = build(dataset, "holdout")
+    assert "**Before (base revision):**" in markdown
+    assert "**After (head revision):**" in markdown

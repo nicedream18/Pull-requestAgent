@@ -32,7 +32,12 @@ from pathlib import Path
 from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
 from evals.metrics import EVALUATOR_VERSION, evaluate_cases
 from evals.run import _git_commit, _price_env
-from prguard.agents import PROMPT_VERSION
+from prguard.agents import (
+    DEFAULT_PROMPT_VERSION,
+    available_prompt_versions,
+    prompt_sha,
+    prompt_version_or_default,
+)
 from prguard.flow import ReviewFlow
 from prguard.models import Finding, FlowState, PRReviewRequest
 from prguard.verifier import verify_findings
@@ -44,7 +49,11 @@ def _load_cases(path: Path) -> tuple[dict, list[dict]]:
 
 
 def _run_once(
-    cases: list[dict], mode: str, model: str | None, output_dir: Path
+    cases: list[dict],
+    mode: str,
+    model: str | None,
+    output_dir: Path,
+    prompt_version: str = "",
 ) -> tuple[list[FlowState], list[dict]]:
     """One strategy pass, keeping the frozen pre-verifier snapshot of each case.
 
@@ -65,6 +74,7 @@ def _run_once(
             output_dir=str(output_dir / "reviews" / case["case_id"]),
             max_agent_calls=6,
             concurrency=3,
+            prompt_version=prompt_version,
             # The verifier is applied afterwards, once per rung, so this pass must not
             # pre-empt either configuration.
             condition_checks=True,
@@ -150,13 +160,15 @@ def _summarise(label: str, scores: dict, rejections: dict, states: list[FlowStat
     }
 
 
-def _print_dry_run(mode: str, model: str | None, cases: list[dict]) -> int:
+def _print_dry_run(mode: str, model: str | None, cases: list[dict], prompt_version: str) -> int:
     input_rate = _price_env("PRGUARD_INPUT_PRICE_PER_1M")
     output_rate = _price_env("PRGUARD_OUTPUT_PRICE_PER_1M")
     calls = 2.73 * len(cases)
     print("PRGuard ablation dry run")
     print(f"  mode            : {mode}")
-    print(f"  prompt          : {PROMPT_VERSION}")
+    print(f"  prompt version  : {prompt_version}")
+    print(f"  prompt sha      : {prompt_sha(prompt_version)}")
+    print(f"  git commit      : {_git_commit()}")
     print(f"  evaluator       : {EVALUATOR_VERSION}")
     print(f"  model           : {model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-chat'}")
     print(f"  cases           : {len(cases)}")
@@ -181,12 +193,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--output", type=Path, default=Path("artifacts/evals/ablation"))
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--prompt-version",
+        choices=available_prompt_versions(),
+        default=DEFAULT_PROMPT_VERSION,
+        help="Prompt body sent to the agents. This changes the real text, not just a label.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
     dataset, cases = _load_cases(args.dataset)
+    chosen_prompt = prompt_version_or_default(args.prompt_version)
     if args.dry_run:
-        return _print_dry_run(args.mode, args.model, cases)
+        return _print_dry_run(args.mode, args.model, cases, chosen_prompt)
 
     if args.mode == "online" and not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("PRGUARD_API_KEY")):
         parser.error("online mode requires an LLM API key")
@@ -196,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"running one {args.mode} pass over {len(cases)} cases")
-    states, failures = _run_once(cases, args.mode, args.model, output_dir)
+    states, failures = _run_once(cases, args.mode, args.model, output_dir, chosen_prompt)
 
     raw_scores = _raw_row(cases, states)
     b_scores, b_rejections = _replay_verifier(cases, states, check_conditions=False)
@@ -212,7 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": "1.0",
         "evaluator_version": EVALUATOR_VERSION,
         "git_commit": _git_commit(),
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": chosen_prompt,
+        "prompt_sha": prompt_sha(chosen_prompt),
         "dataset_version": dataset.get("dataset_version", "unknown"),
         "case_count": len(cases),
         "failed_cases": failures,

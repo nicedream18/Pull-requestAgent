@@ -77,6 +77,9 @@ class PRReviewRequest(BaseModel):
     # Recover a missing or placeholder file_path from trusted diff data before
     # rejecting the finding. Never guesses; see prguard.paths.
     resolve_paths: bool = True
+    # Which prompt body the agents receive. This is a real selection, not a label:
+    # it changes the text CrewAI sends. Empty means the module default.
+    prompt_version: str = ""
 
     @model_validator(mode="after")
     def validate_target(self) -> "PRReviewRequest":

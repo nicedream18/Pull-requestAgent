@@ -557,8 +557,8 @@ def _flow_with_claims(case_id: str, findings: list[Finding], condition_checks: b
     case = CASES[case_id]
     snapshot, sources = snapshot_for(case)
 
-    async def runner(agent, context, model, *, semaphore, timeout_seconds):
-        del context, model, semaphore, timeout_seconds
+    async def runner(agent, context, model, *, semaphore, timeout_seconds, prompt_version=None):
+        del context, model, semaphore, timeout_seconds, prompt_version
         payload = findings if agent == "SecurityAgent" else []
         return AgentRun(
             agent=agent,
@@ -1299,3 +1299,118 @@ def test_run_agent_once_uses_the_shared_builder(monkeypatch):
 
     source = inspect.getsource(agents.run_agent_once)
     assert "build_task_description(" in source
+
+
+# --- prompt version selection (P1) -------------------------------------------
+
+
+def test_prompt_registry_exposes_v2_and_v3():
+    from prguard import agents
+
+    versions = agents.available_prompt_versions()
+    assert "prguard-review-v2" in versions
+    assert "prguard-review-v3" in versions
+
+
+def test_v2_and_v3_render_different_text():
+    """A version switch must change the real prompt, not a label."""
+    from prguard import agents
+
+    v2 = agents.build_task_description("CodeQualityAgent", "prguard-review-v2")
+    v3 = agents.build_task_description("CodeQualityAgent", "prguard-review-v3")
+    assert v2 != v3
+    assert agents.prompt_sha("prguard-review-v2") != agents.prompt_sha("prguard-review-v3")
+    # v3 adds the path contract; v2 must not contain it.
+    assert "Never write 'unknown'" not in v2
+    assert "Never write 'unknown'" in v3
+
+
+def test_v2_text_matches_the_recovered_historical_version():
+    """Guard against silently editing the baseline used by the first online run."""
+    from prguard import agents
+
+    v2 = agents.build_task_description("SecurityAgent", "prguard-review-v2")
+    for marker in (
+        "Your assigned scope:",
+        "Allowed issue_type values:",
+        "Scope rules:",
+        "Return JSON matching AgentFindings, or an empty findings array",
+        "<untrusted_review_context>\n{review_context}\n</untrusted_review_context>",
+    ):
+        assert marker in v2, marker
+    assert agents.prompt_sha("prguard-review-v2") == "044658d206ef"
+
+
+@pytest.mark.parametrize("version", ["prguard-review-v2", "prguard-review-v3"])
+def test_every_version_renders_for_every_agent_without_brace_errors(version):
+    from prguard import agents
+
+    for name in agents.AGENTS:
+        description = agents.build_task_description(name, version)
+        assert re.findall(r"\{[^{}]*\}", description) == ["{review_context}"], (version, name)
+        assert description.format(review_context="UNTRUSTED").count("UNTRUSTED") == 1
+
+
+def test_unknown_prompt_version_is_rejected():
+    from prguard import agents
+
+    with pytest.raises(ValueError, match="unknown prompt version"):
+        agents.build_task_description("CodeQualityAgent", "prguard-review-v99")
+
+
+def test_production_task_uses_the_selected_version(monkeypatch):
+    """`run_agent_once` must pass the version into the real Task construction."""
+    import asyncio
+
+    from prguard import agents
+
+    captured = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured["description"] = kwargs["description"]
+
+    monkeypatch.setattr(agents, "Task", FakeTask)
+    monkeypatch.setattr(agents, "Agent", lambda **kwargs: object())
+
+    class FakeCrew:
+        def __init__(self, **kwargs):
+            pass
+
+        async def kickoff_async(self, inputs):
+            raise RuntimeError("stop before the network")
+
+    monkeypatch.setattr(agents, "Crew", FakeCrew)
+
+    with pytest.raises(RuntimeError, match="stop before the network"):
+        asyncio.run(agents.run_agent_once("CodeQualityAgent", "ctx", None, "prguard-review-v2"))
+    assert "Never write 'unknown'" not in captured["description"]
+
+    captured.clear()
+    with pytest.raises(RuntimeError, match="stop before the network"):
+        asyncio.run(agents.run_agent_once("CodeQualityAgent", "ctx", None, "prguard-review-v3"))
+    assert "Never write 'unknown'" in captured["description"]
+
+
+def test_prompt_version_reaches_the_runner_through_the_request():
+    from prguard.flow import ReviewFlow
+    from prguard.models import AgentRun, PRReviewRequest
+
+    case = CASES["sf-any"] if "sf-any" in CASES else CASES["sql-injection-05"]
+    snapshot, sources = snapshot_for(case)
+    seen = {}
+
+    async def runner(agent, context, model, *, semaphore, timeout_seconds, prompt_version=None):
+        del agent, context, model, semaphore, timeout_seconds
+        seen["version"] = prompt_version
+        return AgentRun(agent="a", status="success", started_at="n", ended_at="n", calls=1)
+
+    request = PRReviewRequest(
+        repo=snapshot.repo, pr_number=snapshot.pr_number, strategy="dynamic",
+        mode="offline", output_dir="/private/tmp/prguard-pv",
+        prompt_version="prguard-review-v2",
+    )
+    ReviewFlow(github_client=FixtureClient(snapshot, sources), agent_runner=runner).kickoff(
+        inputs={"request": request.model_dump()}
+    )
+    assert seen["version"] == "prguard-review-v2"

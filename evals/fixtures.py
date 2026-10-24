@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -62,34 +63,112 @@ def snapshot_for(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
     return snapshot, {case["file_path"]: source}
 
 
-def _multi_file_snapshot(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
-    """Build a snapshot whose diff really contains several files.
+CONTEXT_LINES = 3
 
-    Each file gets its own hunk, so path recovery has a genuine choice between
-    candidates instead of the trivially unique single-file case.
+
+def _new_file_hunk(source: str) -> tuple[str, int]:
+    """All-additions hunk for a file that does not exist in the base revision."""
+    lines = source.splitlines()
+    return f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join(f"+{line}" for line in lines), len(lines)
+
+
+def _modified_file_hunk(base: str, head: str) -> tuple[str, int, int, int]:
+    """Real unified hunk with context, additions and deletions.
+
+    Returns ``(hunk, additions, deletions, first_changed_head_line)``. Line numbers in
+    the ``+`` side are the head revision's, which is what a finding must cite.
+    """
+    base_lines = base.splitlines()
+    head_lines = head.splitlines()
+    diff_lines = list(
+        difflib.unified_diff(base_lines, head_lines, fromfile="a", tofile="b", n=CONTEXT_LINES, lineterm="")
+    )
+    hunk: list[str] = []
+    additions = deletions = 0
+    for line in diff_lines[2:]:  # drop the ---/+++ banners; the caller writes them
+        hunk.append(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            additions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+    first_changed = None
+    head_line = 0
+    for line in hunk:
+        if line.startswith("@@"):
+            match = re.search(r"\+(\d+)", line)
+            if match:
+                head_line = int(match.group(1))
+        elif line.startswith("+"):
+            if first_changed is None:
+                first_changed = head_line
+            head_line += 1
+        elif line.startswith("-"):
+            continue
+        else:
+            head_line += 1
+    return "\n".join(hunk), additions, deletions, first_changed or 1
+
+
+def _multi_file_snapshot(case: dict) -> tuple[PRSnapshot, dict[str, str]]:
+    """Build a snapshot whose diff really contains the changed files.
+
+    Two modes, selected per file by whether the entry carries `base_code`:
+
+    * **real diff** (`base_code` present): a proper unified hunk with context lines,
+      deletions and head-side line numbers, plus `previous_filename` for renames.
+    * **synthetic new file** (no `base_code`): an all-additions hunk. This is honest
+      for a genuinely added file but it means every line counts as changed, so a
+      finding on unchanged context cannot be distinguished. The older 32 cases use
+      this mode; `docs/evaluation-protocol.md` records the limitation.
     """
     files: list[PRFile] = []
     sources: dict[str, str] = {}
     hunks: list[str] = []
     for entry in case["files"]:
         source = entry["code"]
-        lines = source.splitlines()
         status = entry.get("status", "modified")
         sources[entry["path"]] = source
-        patch = f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join(f"+{line}" for line in lines)
+        previous = entry.get("previous_filename")
+        base_code = entry.get("base_code")
+
+        if status == "removed":
+            base_lines = (base_code if base_code is not None else source).splitlines()
+            patch = f"@@ -1,{len(base_lines)} +0,0 @@\n" + "\n".join(f"-{line}" for line in base_lines)
+            additions, deletions, changes = 0, len(base_lines), len(base_lines)
+        elif base_code is not None:
+            patch, additions, deletions, _ = _modified_file_hunk(base_code, source)
+            changes = additions + deletions
+        else:
+            patch, additions = _new_file_hunk(source)
+            deletions, changes = 0, additions
+            if status == "modified":
+                # No base revision was supplied, so the diff can only be all-additions.
+                # Record the file as added to keep the snapshot self-consistent.
+                status = "added"
+
         files.append(
             PRFile(
                 path=entry["path"],
                 status=status,
                 patch=None if status == "removed" else patch,
-                changes=len(lines),
+                additions=additions,
+                deletions=deletions,
+                changes=changes,
+                previous_filename=previous,
             )
         )
+        banner = f"diff --git a/{previous or entry['path']} b/{entry['path']}\n"
+        if status == "added":
+            banner += "new file mode 100644\n"
+        elif status == "removed":
+            banner += "deleted file mode 100644\n"
+        elif previous:
+            banner += f"rename from {previous}\nrename to {entry['path']}\n"
         hunks.append(
-            f"diff --git a/{entry['path']} b/{entry['path']}\n"
-            f"--- a/{entry['path']}\n"
-            f"+++ b/{entry['path']}\n"
-            + (patch if status != "removed" else "")
+            banner
+            + f"--- a/{previous or entry['path']}\n"
+            + f"+++ b/{entry['path']}\n"
+            + patch
         )
     snapshot = PRSnapshot(
         repo="prguard/fixture",
@@ -130,8 +209,17 @@ class OfflineFixtureRunner:
     def __init__(self, sources: dict[str, str]):
         self.sources = sources
 
-    async def __call__(self, agent: str, context: str, model: str | None, *, semaphore: asyncio.Semaphore, timeout_seconds: int) -> AgentRun:
-        del model, timeout_seconds
+    async def __call__(
+        self,
+        agent: str,
+        context: str,
+        model: str | None,
+        *,
+        semaphore: asyncio.Semaphore,
+        timeout_seconds: int,
+        prompt_version: str | None = None,
+    ) -> AgentRun:
+        del model, timeout_seconds, prompt_version
         started = datetime.now(timezone.utc)
         clock = time.monotonic()
         findings: list[Finding] = []

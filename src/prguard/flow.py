@@ -195,6 +195,7 @@ class ReviewFlow(Flow[FlowState]):
                 self.request.model,
                 semaphore=semaphore,
                 timeout_seconds=self.request.timeout_seconds,
+                prompt_version=self.request.prompt_version or None,
             )
             if self.event_sink:
                 try:

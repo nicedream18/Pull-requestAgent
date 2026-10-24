@@ -9,7 +9,12 @@ from pathlib import Path
 
 from evals.fixtures import DATASET, FixtureClient, OfflineFixtureRunner, snapshot_for
 from evals.metrics import EVALUATOR_VERSION, aggregate_performance
-from prguard.agents import PROMPT_VERSION
+from prguard.agents import (
+    DEFAULT_PROMPT_VERSION,
+    available_prompt_versions,
+    prompt_sha,
+    prompt_version_or_default,
+)
 from prguard.flow import ReviewFlow
 from prguard.models import PRReviewRequest
 
@@ -56,6 +61,7 @@ def _run_strategy(
     output_dir: Path,
     model: str | None,
     condition_checks: bool = True,
+    prompt_version: str = "",
 ) -> tuple[dict, list[dict]]:
     case_results: list[dict] = []
     per_case_runs: list[dict] = []
@@ -72,6 +78,7 @@ def _run_strategy(
             max_agent_calls=6,
             concurrency=3,
             condition_checks=condition_checks,
+            prompt_version=prompt_version,
         )
         flow = ReviewFlow(github_client=FixtureClient(snapshot, sources), agent_runner=runner)
         flow.kickoff(inputs={"request": request.model_dump()})
@@ -122,7 +129,7 @@ MEASURED_OUTPUT_TOKENS_PER_PR = 2463.9
 MEASURED_SECONDS_PER_RUN = 10.96 * 15
 
 
-def _print_dry_run(args, cases: list[dict], dataset: dict) -> int:
+def _print_dry_run(args, cases: list[dict], dataset: dict, prompt_version: str) -> int:
     strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else ["single", "static", "dynamic"]
     defect_cases = sum(1 for case in cases if case["is_real_defect"])
     calls = MEASURED_CALLS_PER_PR * len(cases)
@@ -140,7 +147,9 @@ def _print_dry_run(args, cases: list[dict], dataset: dict) -> int:
     print(f"  strategies        : {', '.join(strategies)}")
     print(f"  dataset           : {args.dataset} v{dataset.get('dataset_version')}, {len(cases)} cases ({defect_cases} with a labelled defect)")
     print(f"  evaluator         : {EVALUATOR_VERSION}")
-    print(f"  prompt            : {PROMPT_VERSION}")
+    print(f"  prompt version    : {prompt_version}")
+    print(f"  prompt sha        : {prompt_sha(prompt_version)}")
+    print(f"  git commit        : {_git_commit()}")
     print(f"  condition checks  : {'on' if args.condition_checks == 'on' else 'off'}")
     print(f"  model             : {args.model or os.getenv('PRGUARD_MODEL') or os.getenv('DEEPSEEK_MODEL') or 'deepseek/deepseek-chat'}")
     credentials = "present" if (os.getenv("DEEPSEEK_API_KEY") or os.getenv("PRGUARD_API_KEY")) else "missing"
@@ -172,6 +181,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Validate the configuration and print the plan and cost estimate without calling a model.",
     )
     parser.add_argument(
+        "--prompt-version",
+        choices=available_prompt_versions(),
+        default=DEFAULT_PROMPT_VERSION,
+        help="Prompt body sent to the agents; changes the real text, not just a label.",
+    )
+    parser.add_argument(
         "--condition-checks",
         choices=("on", "off"),
         default="on",
@@ -185,8 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     dataset = json.loads(args.dataset.read_text(encoding="utf-8"))
     cases = dataset["cases"]
 
+    chosen_prompt = prompt_version_or_default(args.prompt_version)
     if args.dry_run:
-        return _print_dry_run(args, cases, dataset)
+        return _print_dry_run(args, cases, dataset, chosen_prompt)
     if len(cases) < 15:
         parser.error("dataset must contain at least 15 manually reviewable cases")
     strategies = [args.strategy] if args.strategy in {"single", "static", "dynamic"} else (["single", "static", "dynamic"] if args.mode == "offline" else ["dynamic"])
@@ -203,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir,
             args.model,
             condition_checks=args.condition_checks == "on",
+            prompt_version=chosen_prompt,
         )
         summaries[strategy] = summary
         all_cases[strategy] = detail
@@ -216,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         "dataset": str(args.dataset),
         "dataset_version": dataset.get("dataset_version", "unknown"),
         "case_count": len(cases),
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": chosen_prompt,
+        "prompt_sha": prompt_sha(chosen_prompt),
         "model": args.model or (os.getenv("PRGUARD_MODEL") or os.getenv("DEEPSEEK_MODEL") if args.mode == "online" else "deterministic-fixture-runner"),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
         "condition_checks": args.condition_checks == "on",
@@ -268,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         f"- Mode: `{args.mode}` ({document['evaluation_type']})",
         f"- Dataset: `{args.dataset}` v{document['dataset_version']}, {len(cases)} manually reviewed fixtures",
         f"- Model: `{document['model']}`",
-        f"- Prompt: `{PROMPT_VERSION}`",
+        f"- Prompt: `{chosen_prompt}` (sha `{prompt_sha(chosen_prompt)}`)",
         f"- Evaluated: `{document['evaluated_at']}`",
         f"- Evaluator: `{EVALUATOR_VERSION}`",
         f"- Condition checks: `{'on' if args.condition_checks == 'on' else 'off'}`",

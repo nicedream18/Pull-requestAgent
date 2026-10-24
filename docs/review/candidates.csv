@@ -1,0 +1,42 @@
+case_id,split,defect_id,file_path,line_range,issue_type,severity,evidence,trigger_condition,is_substantive_defect,other_unlabelled_defects,reviewer_notes,review_status
+mf-secret-01,dev,mf-secret-01-d1,app/config.py,1-1,hardcoded_secret,critical,"API_TOKEN = ""sk-live-8f2b41c9de77""",Anyone with repository read access reads app/config.py line 1.,,,,draft
+mf-cross-02,holdout,mf-cross-02-d1,app/report.py,5-5,cross_file_breakage,high,return account.balance,Calling total() with any Account instance raises AttributeError.,,,,draft
+mf-two-defects-03,test,mf-two-defects-03-d1,app/search.py,2-2,sql_injection,critical,"cursor.execute(f""SELECT * FROM users WHERE name = '{name}'"")",A name containing a quote changes the query structure.,,,,draft
+mf-two-defects-03,test,mf-two-defects-03-d2,app/uploads.py,5-5,overly_permissive_file_mode,high,"os.chmod(path, 0o777)",save() is called on any path.,,,,draft
+mf-basename-04,test,mf-basename-04-d1,app/settings.py,1-1,hardcoded_secret,critical,"TOKEN = ""sk-live-1a2b3c4d5e6f""",Reading app/settings.py exposes the token.,,,,draft
+mf-basename-05,test,mf-basename-05-d1,tests/settings.py,1-1,hardcoded_secret,critical,"TOKEN = ""sk-live-9z8y7x6w5v4u""",Reading tests/settings.py exposes the token.,,,,draft
+mf-clean-06,dev,,"app/format.py, app/strings.py, app/numbers.py",,,,,,,,,draft
+mf-clean-07,dev,,docs/usage.md,,,,,,,,,draft
+mf-similar-08,test,mf-similar-08-d1,app/open_a.py,2-2,resource_leak,medium,handle = open(path),open_a() returns and the file object is garbage collected.,,,,draft
+mf-three-defects-09,test,mf-three-defects-09-d1,app/import_a.py,3-3,missing_exception_handling,medium,return json.loads(text),parse() receives invalid JSON.,,,,draft
+mf-three-defects-09,test,mf-three-defects-09-d2,app/import_b.py,2-2,division_by_zero,medium,return total / count,ratio() is called with count == 0.,,,,draft
+mf-three-defects-09,test,mf-three-defects-09-d3,app/import_c.py,2-2,boundary_condition,high,for i in range(len(items) + 1):,last() is called with any list; the final iteration raises IndexError.,,,,draft
+mf-same-line-10,test,mf-same-line-10-d1,app/persist.py,5-5,overly_permissive_file_mode,high,"os.chmod(path, 0o777)",persist() is called on any path.,,,,draft
+mf-same-line-10,test,mf-same-line-10-d2,app/persist.py,5-5,hardcoded_secret,critical,"TOKEN = ""sk-live-77aa88bb99cc""",Reading app/persist.py exposes the token.,,,,draft
+mf-deleted-11,test,,"app/exporter.py, app/new_export.py",,,,,,,,,draft
+sf-null-12,holdout,sf-null-12-d1,app/profile.py,5-5,null_dereference,high,return user.name,"display_name(None) is called, which the annotation permits.",,,,draft
+sf-leak-13,dev,sf-leak-13-d1,app/export.py,2-2,resource_leak,medium,handle = open(path),export() returns or raises before closing.,,,,draft
+sf-testgap-14,test,sf-testgap-14-d1,app/transfers.py,4-5,missing_test_coverage,medium,target.credit(amount),credit() fails after debit() succeeded.,,,,draft
+safe-param-sql-15,dev,,app/search.py,,,,,,,,,draft
+safe-subprocess-16,dev,,app/runner.py,,,,,,,,,indeterminate
+safe-with-open-17,dev,,app/read.py,,,,,,,,,draft
+safe-guard-18,dev,,app/profile.py,,,,,,,,,draft
+safe-env-secret-19,dev,,app/config.py,,,,,,,,,draft
+tricky-constant-sql-20,test,,app/count.py,,,,,,,,,draft
+tricky-mixed-sql-21,test,tricky-mixed-sql-21-d1,app/search.py,5-5,sql_injection,critical,cursor.execute(f'SELECT * FROM users WHERE name = {name}'),mode is anything other than 'safe'.,,,,draft
+tricky-guard-not-dominating-22,test,tricky-guard-not-dominating-22-d1,app/batch.py,2-2,boundary_condition,high,for i in range(len(items) + 1):,last() is called with any list; the final iteration reads items[len(items)] first.,,,,draft
+tricky-guard-dominating-23,test,,app/batch.py,,,,,,,,,draft
+tricky-evidence-no-defect-24,test,,app/notes.py,,,,,,,,,draft
+tricky-rename-both-sides-25,test,,"app/models.py, app/views.py",,,,,,,,,draft
+tricky-two-agents-one-defect-26,holdout,tricky-two-agents-one-defect-26-d1,app/uploads.py,5-5,overly_permissive_file_mode,high,"os.chmod(path, 0o777)",save() is called on any path.,,,,draft
+tricky-adjacent-same-type-27,holdout,tricky-adjacent-same-type-27-d1,app/writer.py,5-5,overly_permissive_file_mode,high,"os.chmod(path, 0o777)",write_a() is called on any path.,,,,draft
+tricky-adjacent-same-type-27,holdout,tricky-adjacent-same-type-27-d2,app/writer.py,9-9,overly_permissive_file_mode,high,"os.chmod(path, 0o777)",write_b() is called on any path.,,,,draft
+tricky-multiline-sql-28,test,tricky-multiline-sql-28-d1,app/report.py,2-2,sql_injection,critical,query = 'SELECT * FROM ' + table,table comes from user input.,,,,indeterminate
+tricky-late-import-29,dev,tricky-late-import-29-d1,app/queue.py,3-3,missing_exception_handling,medium,return json.loads(text),parse() receives a non-JSON payload.,,,,draft
+tricky-docstring-only-30,dev,,app/module.py,,,,,,,,,draft
+tricky-deleted-target-31,holdout,,"app/old.py, app/current.py",,,,,,,,,draft
+tricky-windows-path-32,holdout,tricky-windows-path-32-d1,app/export.py,2-2,resource_leak,medium,handle = open(root + '/out.csv'),export() returns before closing.,,,,draft
+real-diff-context-33,dev,real-diff-context-33-d1,app/retry.py,4-4,boundary_condition,high,    for attempt in range(times + 1):,retry(3) yields four attempts.,,,,draft
+real-diff-rename-34,holdout,real-diff-rename-34-d1,app/utilities.py,2-2,resource_leak,medium,    handle = open(path),helper() returns before closing the handle.,,,,draft
+real-diff-deletion-35,test,,app/uploads.py,,,,,,,,,draft
+real-diff-guard-line-36,test,real-diff-guard-line-36-d1,app/rows.py,5-5,boundary_condition,medium,            result.append(row[0]),row is a non-empty list or string whose first element is intended.,,,,indeterminate

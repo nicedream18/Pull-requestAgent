@@ -29,6 +29,9 @@ jobs:
       - name: Candidate dataset label consistency
         run: |
           PYTHONPATH=src uv run python -m evals.check_labels
+      - name: Review packet is regenerable
+        run: |
+          PYTHONPATH=src uv run python -m evals.review_packet --output artifacts/review-packet
       - name: Assert the offline baseline did not regress
         run: |
           python - <<'PY'
@@ -66,12 +69,14 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: uv sync
-      - name: PathResolver, dedup and verifier regressions
+      - name: PathResolver, dedup, diff, metrics and prompt-version regressions
         run: >
           PYTHONPATH=src uv run pytest
           tests/test_paths_and_dedup.py
           tests/test_path_resolver_multi_file.py
           tests/test_dedup_and_dataset.py
+          tests/test_diff_realism.py
+          tests/test_category_metrics.py
           tests/test_false_positive_controls.py
           tests/test_evaluator_v1_replay.py
           -q
